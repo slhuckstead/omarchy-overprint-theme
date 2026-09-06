@@ -1,0 +1,88 @@
+#!/bin/bash
+
+# Overprint's screensaver renderer, shadowing the packaged omarchy-screensaver.
+#
+# WHY A SHADOW. Omarchy's idle service hardcodes `omarchy-launch-screensaver`
+# (plugins/services/idle/Service.qml:66) and no config key changes it --
+# `idle.screensaverCommand` in shell.json is not real. But the stock LAUNCHER is
+# worth keeping: it loops every monitor (so a second display does not sit showing
+# your desktop until the lock lands), honours the screensaver-off toggle and the
+# `force` argument, works with any of the four terminals, and saves and restores
+# focus. Only the innermost command needs to change, and that is this file.
+# ~/.local/bin is prepended to PATH in ~/.bashrc so this wins.
+#
+# WHY THE RENDERER RUNS IN THE FOREGROUND. overprint-screensaver calls
+# tty.setcbreak() to read keypresses itself. A BACKGROUND process that changes
+# terminal attributes takes SIGTTOU and dies -- so running it with `&` killed it
+# instantly and silently fell through to the packaged wordmark. It owns the
+# terminal; the focus watchdog is what gets backgrounded, and it never touches
+# the tty.
+
+RENDERER="$HOME/.local/bin/overprint-screensaver"
+STOCK="/usr/share/omarchy/bin/omarchy-screensaver"
+
+screensaver_in_focus() {
+  hyprctl activewindow -j | jq -e '.class == "org.omarchy.screensaver"' >/dev/null 2>&1
+}
+
+cleanup() {
+  [[ -n ${WPID:-} ]] && kill "$WPID" 2>/dev/null
+  hyprctl eval 'hl.config({ cursor = { invisible = false } })' &>/dev/null \
+    || hyprctl keyword cursor:invisible false &>/dev/null || true
+}
+
+exit_screensaver() {
+  cleanup
+  pkill -x ttfx 2>/dev/null
+  pkill -f '[o]rg.omarchy.screensaver' 2>/dev/null
+  exit 0
+}
+
+[[ -x $RENDERER ]] || exec "$STOCK"
+trap exit_screensaver SIGINT SIGTERM SIGHUP SIGQUIT
+
+hyprctl eval 'hl.config({ cursor = { invisible = true } })' &>/dev/null \
+  || hyprctl keyword cursor:invisible true &>/dev/null
+
+# Terminals allocate the pty at 80x24 and only resize once the compositor has
+# sized the window. Starting before that paints a tiny canvas in the corner.
+wait_for_terminal_resize() {
+  local deadline=$((SECONDS + 2))
+  while ((SECONDS < deadline)) && [[ $(stty size 2>/dev/null) == "24 80" ]]; do
+    sleep 0.02
+  done
+}
+wait_for_terminal_resize
+
+# Focus watchdog. Backgrounded, so it must not read or configure the terminal.
+# The grace period matters: focus has not necessarily landed on the screensaver
+# when it starts, and two consecutive misses are required so a transient focus
+# report cannot kill it.
+(
+  sleep 3
+  miss=0
+  while sleep 1; do
+    if screensaver_in_focus; then miss=0; else miss=$((miss + 1)); fi
+    ((miss >= 2)) && break
+  done
+  pkill -f "$RENDERER"
+) &
+WPID=$!
+
+# Keep the renderer's stderr. Everything about this screensaver failed silently
+# for weeks; a crash should leave a trace someone can read.
+LOG="${XDG_STATE_HOME:-$HOME/.local/state}/overprint"
+mkdir -p "$LOG"
+start=$SECONDS
+"$RENDERER" 2>"$LOG/screensaver.err"
+rc=$?
+printf '%s exit=%s after %ss (mode picked at random)\n' \
+  "$(date -Is)" "$rc" "$((SECONDS - start))" >>"$LOG/screensaver.log"
+cleanup
+
+# Died on the spot? Hand back to the packaged renderer rather than leaving a
+# blank screen. A normal keypress exit is rc 0, or a signal from the watchdog.
+if ((SECONDS - start <= 1)) && ((rc != 0)); then
+  exec "$STOCK"
+fi
+exit_screensaver

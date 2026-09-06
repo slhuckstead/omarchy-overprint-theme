@@ -1,0 +1,6 @@
+[Unit]
+Description=Report a failure of %i on the desktop
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/overprint-notify-failure %i

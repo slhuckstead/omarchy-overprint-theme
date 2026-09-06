@@ -1,0 +1,15 @@
+[Unit]
+Description=Adapt the backlight to room light
+# The adapter talks to Hyprland, the theme tool and the backlight, none of which
+# exist before the graphical session does. Without these guards a catch-up run
+# (Persistent=true on the timer) fires at login into a half-built session and
+# stages a partly-themed desktop.
+After=graphical-session.target
+PartOf=graphical-session.target
+ConditionEnvironment=WAYLAND_DISPLAY
+# Failures were journal-only and mostly exited 0. Say so out loud.
+OnFailure=overprint-failure-notify@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/overprint-adapt

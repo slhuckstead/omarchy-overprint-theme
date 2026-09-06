@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+#
+# Build a theme's picker card the way every first-party Omarchy theme does it:
+# a screenshot of the desktop actually running the theme.
+#
+# WHY THIS EXISTS. Overprint shipped a downscaled wallpaper as its preview.png
+# while solitude, last-horizon and lupine all ship a screenshot of a working
+# desktop -- bar, tiled terminals, file manager, borders, wallpaper behind. In
+# the theme picker that is not a polish gap, it is a different question being
+# answered: theirs show what your desktop will look like, ours showed an
+# abstract image.
+#
+# WHY IT IS A SCRIPT AND NOT PART OF THE GENERATOR. Taking the screenshot needs
+# a clean workspace, and switching workspaces requires a real session: an agent
+# calling `hyprctl dispatch workspace N` gets no effect at all (verified against
+# both the legacy and the Omarchy 4 Lua form), so any capture it takes contains
+# whatever you had open. A human at the keyboard does in one keystroke what the
+# tooling cannot do at all, so this asks you to do that one part.
+#
+# USAGE
+#   overprint-make-preview [theme-name] [seconds]
+#
+#   overprint-make-preview                    # current theme, 20s to arrange
+#   overprint-make-preview 30                 # ...with longer
+#   overprint-make-preview overprint-light 30 # a named theme
+#
+# There is no key to press. A prompt would need a focused terminal, and that
+# terminal would then be the ACTIVE window -- wearing the three-ink border that
+# the card exists to show. A timer avoids that entirely.
+#
+# It applies the theme, waits for you to arrange a workspace the way you want
+# the card to look, captures, and writes preview.png and preview-unlock.png into
+# that theme's directory at 2880x1800 -- the size solitude and last-horizon use.
+set -euo pipefail
+
+# overprint-make-preview [theme] [seconds]
+THEME=""; DELAY_ARG=""
+for a in "$@"; do
+  if [[ $a =~ ^[0-9]+$ ]]; then DELAY_ARG="$a"; elif [[ $a != --* ]]; then THEME="$a"; fi
+done
+THEMES="$HOME/.config/omarchy/themes"
+
+die() { printf 'overprint-make-preview: %s\n' "$1" >&2; exit 1; }
+for c in hyprctl grim magick jq; do
+  command -v "$c" >/dev/null || die "missing: $c"
+done
+
+if [[ -z $THEME ]]; then
+  THEME=$(cat "$HOME/.local/state/omarchy/current/theme.name" 2>/dev/null || true)
+  THEME=${THEME,,}; THEME=${THEME// /-}
+fi
+DIR="$THEMES/$THEME"
+[[ -d $DIR ]] || die "no such theme: $DIR"
+
+echo "Building the picker card for: $THEME"
+# Only re-apply when it is not already current. Re-applying restarts the
+# terminals, and anything already running that loaded a colourscheme at startup
+# -- nvim above all -- keeps the OLD one, so the shot comes out half light and
+# half dark. If the theme is already live, leave the scene alone.
+CURRENT=$(cat "$HOME/.local/state/omarchy/current/theme.name" 2>/dev/null | tr 'A-Z ' 'a-z-')
+if [[ $CURRENT != "$THEME" ]]; then
+  echo "  applying $THEME (restart your scene windows afterwards, or apps"
+  echo "  that loaded a colourscheme at startup will keep the old one)"
+  omarchy theme set "$THEME" >/dev/null 2>&1 || die "could not apply $THEME"
+  sleep 3
+else
+  echo "  $THEME is already live -- not re-applying, so the scene is undisturbed"
+fi
+
+MON=$(hyprctl monitors -j | jq -r '.[]|select(.focused)|.name')
+SECS="${DELAY_ARG:-20}"
+
+# The terminal this runs in is usually one of the panes being photographed, so
+# it should show the THEME rather than this script's own chatter. A card whose
+# terminal reads "Building the picker card..." is a photograph of the camera.
+# Every first-party comp shows real work in that pane.
+#
+# The palette is the most honest thing to put there: these are ANSI escapes, so
+# the terminal resolves them through the theme actually being captured. It is
+# not a picture of the colours, it IS the colours.
+show_plate() {
+  local d="$1" name inks ground cols per cell
+  name=$(basename "$d")
+  inks=$(sed -n 's/^inks = \[//p' "$d/overprint.toml" 2>/dev/null | tr -d '",[]')
+  ground=$(sed -n 's/^ground = "\(.*\)"/\1/p' "$d/overprint.toml" 2>/dev/null)
+  local n=(black red green yellow blue magenta cyan white)
+
+  # The pane being photographed is often a quarter of the screen -- about 45
+  # columns -- and eight 9-wide cells need 74. A wrapped plate looks broken in
+  # the very image it exists to make look good, so lay out to the real width.
+  cols=$(tput cols 2>/dev/null || echo 80)
+  if (( cols >= 76 )); then per=8; cell=9; else per=4; cell=9; fi
+
+  clear
+  printf '\n  \033[1m%s\033[0m\n  a Risograph press, simulated\n\n' "$name"
+  [[ -n ${inks:-} ]]   && printf '  inks    %s\n' "$inks"
+  [[ -n ${ground:-} ]] && printf '  ground  %s\n' "$ground"
+  printf '\n'
+
+  local start i
+  for start in $(seq 0 "$per" 7); do
+    printf '  '; for ((i=start; i<start+per && i<8; i++)); do
+      printf '\033[4%dm%*s\033[0m   ' "$i" "$((cell-3))" ""; done; printf '\n'
+    printf '  '; for ((i=start; i<start+per && i<8; i++)); do
+      printf '\033[3%dm%-*s\033[0m' "$i" "$cell" "${n[$i]}"; done; printf '\n'
+  done
+  printf '\n'
+  for start in $(seq 0 "$per" 7); do
+    printf '  '; for ((i=start; i<start+per && i<8; i++)); do
+      printf '\033[10%dm%*s\033[0m   ' "$i" "$((cell-3))" ""; done; printf '\n'
+    printf '  '; for ((i=start; i<start+per && i<8; i++)); do
+      printf '\033[9%dm%-*s\033[0m' "$i" "$cell" "${n[$i]}"; done; printf '\n'
+  done
+  printf '\n  Every slot is an ink, a two-ink overprint,\n'
+  printf '  or all three, retargeted in OKLab until it\n'
+  printf '  clears its contrast floor.\n\n'
+}
+
+cat <<EOF
+
+  Capturing $MON in $SECS seconds. No key to press:
+
+    1. Super+4  (or wherever your scene is)
+    2. Click the window that should be ACTIVE — it wears the three-ink border
+    3. Leave the pointer somewhere harmless and wait
+
+  Everything on this monitor is captured. Close mail, chat, browser tabs and
+  anything showing a password, a token or a folder you would not publish.
+
+EOF
+sleep 4
+show_plate "$DIR"
+
+for ((i=SECS-4; i>0; i--)); do
+  printf "\r  \033[2m%2ds\033[0m " "$i"
+  sleep 1
+done
+# Clear the countdown AND give the terminal a moment to repaint before grim
+# fires -- otherwise the last tick is still on screen in the captured image.
+printf "\r%-20s\r" ""
+sleep 0.6
+
+TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+grim -o "$MON" "$TMP/shot.png" || die "grim failed"
+
+# 2880x1800 is what solitude and last-horizon ship. Fill the box rather than fit
+# inside it, or a 16:9 panel silently yields 2880x1620.
+magick "$TMP/shot.png" -resize 2880x1800^ -gravity center -extent 2880x1800 \
+  -colors 256 -define png:exclude-chunk=time -define png:compression-level=9 \
+  "$TMP/preview.png"
+
+cp "$TMP/preview.png" "$DIR/preview.png"
+# preview-unlock.png is what omarchy-plymouth-list gates on: without it this
+# theme cannot style the boot or login screen at all.
+cp "$TMP/preview.png" "$DIR/preview-unlock.png"
+
+echo
+echo "  wrote $DIR/preview.png"
+echo "  wrote $DIR/preview-unlock.png"
+echo "  $(identify -format '%wx%h, %b' "$DIR/preview.png")"
+echo
+echo "  Check it in the picker with:  omarchy theme switcher"

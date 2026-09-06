@@ -1,0 +1,5 @@
+press = "harbour"
+mode = "night"
+night = true
+ground = "#0D0F15"
+inks = ["#0F4C81", "#FF5A4D", "#FFE800"]

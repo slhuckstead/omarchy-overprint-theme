@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Surface an Overprint adaptation failure on the desktop.
+#
+# Why this exists: every failure path in this system was journal-only and most
+# of them exited 0, so nothing ever announced a fault. That is how a screensaver
+# that had never once run survived two separate sessions of "fixing" it. A
+# failure the user never sees is indistinguishable from working software.
+set -uo pipefail
+
+unit="${1:-overprint-backlight.service}"
+
+detail=$(journalctl --user -u "$unit" -n 12 --no-pager -o cat 2>/dev/null \
+  | grep -iE 'FAILED|Traceback|Error|is not an Overprint' | tail -2)
+[ -z "$detail" ] && detail="journalctl --user -u $unit -n 30"
+
+if command -v omarchy-notification-send >/dev/null 2>&1; then
+  omarchy-notification-send -u critical -g "⚠" \
+    "Overprint adaptation failed" "$detail"
+else
+  notify-send -u critical "Overprint adaptation failed" "$detail"
+fi

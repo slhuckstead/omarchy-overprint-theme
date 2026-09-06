@@ -1,0 +1,23 @@
+# ---------------------------------------------------------------- Overprint
+# Backlight adaptation. Overprint is ONE theme now, so there is no day/slate/
+# night level to switch between and nothing here changes the theme.
+#
+# Everything that used to live in this file -- APPEARANCE, AUTO_SOURCE,
+# LIGHT_DAY/LIGHT_NIGHT, DARK_SPLIT, DARK_BAND, AGREE, DWELL, LOCATE, LAT, LON --
+# belonged to theme-level switching and is gone with it. Nothing looks up a
+# location or queries a geolocation service any more.
+#
+# Control it with: overprint-appearance [on|off|hold|resume|status]
+
+BRIGHTNESS=on    # off disables backlight adaptation entirely
+BRIGHT_MIN=10    # percent floor, so the panel never goes black
+BRIGHT_MAX=100
+BRIGHT_KNEE=140  # light reading at which brightness reaches BRIGHT_MAX
+MANUAL_HOLD=1800 # if you set brightness yourself, back off for this many seconds
+
+# The webcam is sampled once per timer tick (every 10 min) and its LED blinks.
+# BRIGHTNESS=off does NOT stop that on its own -- the reading is taken before
+# the setting is consulted. To stop the camera entirely:
+#     systemctl --user disable --now overprint-backlight.timer
+#
+# touch ~/.config/overprint/hold   to suspend adaptation without disabling it

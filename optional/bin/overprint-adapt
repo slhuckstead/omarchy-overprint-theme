@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""Adapt the backlight to the room.
+
+Overprint is one theme now, so there is no day/slate/night level left to switch
+and this drives the backlight only. That retired the whole solar/geolocation
+half of this script: sunrise and sunset were only ever consulted to decide a
+theme level, so nothing here looks up a location, queries an IP geolocation
+service, or writes coordinates and solar times into the journal any more.
+"""
+import os, sys, json, time, subprocess
+
+CFGDIR = os.path.expanduser("~/.config/overprint")
+CONF, HOLD = f"{CFGDIR}/backlight.conf", f"{CFGDIR}/hold"
+STATE = f"{CFGDIR}/state.json"
+LIGHT_BIN = os.path.expanduser("~/.local/bin/overprint-light")
+
+# APPEARANCE, AUTO_SOURCE, LIGHT_DAY/NIGHT, DARK_SPLIT/BAND, AGREE, DWELL,
+# LOCATE, LAT and LON all belonged to theme-level switching and are gone with it.
+DEFAULTS = dict(BRIGHTNESS="on", BRIGHT_MIN="10", BRIGHT_MAX="100",
+                BRIGHT_KNEE="140", MANUAL_HOLD="1800")
+
+
+def conf():
+    d = dict(DEFAULTS)
+    try:
+        for line in open(CONF):
+            line = line.split("#", 1)[0].strip()
+            if "=" in line:
+                k, v = line.split("=", 1)
+                d[k.strip()] = v.strip()
+    except FileNotFoundError:
+        pass
+    return d
+
+
+def load(p, default):
+    try:    return json.load(open(p))
+    except Exception: return default
+
+
+def save(p, obj):
+    tmp = p + ".tmp"
+    with open(tmp, "w") as f: json.dump(obj, f, indent=2)
+    os.chmod(tmp, 0o600); os.replace(tmp, p)
+
+
+# ------------------------------------------------------------------- sensing
+def light():
+    try:
+        r = subprocess.run([LIGHT_BIN], capture_output=True, text=True, timeout=30)
+        if r.returncode != 0: return None, None
+        v, src = r.stdout.split()
+        return float(v), src
+    except Exception:
+        return None, None
+
+
+# ---------------------------------------------------------------- brightness
+def bl_get():
+    try:
+        r = subprocess.run(["brightnessctl", "-m"], capture_output=True, text=True, timeout=6)
+        f = r.stdout.strip().split(",")
+        return int(f[2]), int(f[4])          # current raw, max raw
+    except Exception:
+        return None, None
+
+
+def bl_curve(reading, c):
+    lo, hi = float(c["BRIGHT_MIN"]), float(c["BRIGHT_MAX"])
+    knee = max(1.0, float(c["BRIGHT_KNEE"]))
+    return lo + (hi - lo) * min(1.0, reading / knee) ** 0.8
+
+
+def brightness(reading, c, st):
+    if c["BRIGHTNESS"].lower() != "on" or reading is None:
+        return "brightness off" if c["BRIGHTNESS"].lower() != "on" else "no reading"
+    cur, mx = bl_get()
+    if cur is None: return "no backlight"
+    cur_pct = cur / mx * 100.0
+
+    # Respect a manual change: if the panel is not where we left it, someone
+    # moved it on purpose. Stand down for MANUAL_HOLD, then resume.
+    last = st.get("bl_set_pct")
+    if last is not None and abs(cur_pct - last) > 8:
+        st["manual_until"] = time.time() + int(c["MANUAL_HOLD"])
+        st["bl_set_pct"] = None
+        return f"manual change to {cur_pct:.0f}%, standing down"
+    if time.time() < st.get("manual_until", 0):
+        left = (st["manual_until"] - time.time()) / 60
+        return f"manual hold, {left:.0f}m left"
+
+    target = bl_curve(reading, c)
+    if abs(target - cur_pct) < 2.0:
+        st["bl_set_pct"] = cur_pct
+        return f"{cur_pct:.0f}% already right"
+    # ramp, so it reads as the room changing rather than the screen glitching
+    steps = 12
+    failed = None
+    for i in range(1, steps + 1):
+        pct = cur_pct + (target - cur_pct) * i / steps
+        r = subprocess.run(["brightnessctl", "-q", "set", f"{pct:.0f}%"], timeout=6)
+        if r.returncode != 0:
+            failed = r.returncode
+            break
+        time.sleep(0.05)
+    # Record where the panel ACTUALLY ended up, not where we asked it to go.
+    # Storing the request makes an ignored or partial write look, on the next
+    # tick, exactly like the user reaching for the brightness key -- which stands
+    # the adapter down for MANUAL_HOLD and then does it again, forever.
+    now, mx_now = bl_get()
+    st["bl_set_pct"] = (now / mx_now * 100.0) if now is not None and mx_now else None
+    if failed is not None:
+        return f"{cur_pct:.0f}% -> {target:.0f}% FAILED (brightnessctl rc={failed})"
+    return f"{cur_pct:.0f}% -> {target:.0f}%"
+
+
+def main():
+    if os.path.exists(HOLD):
+        print("hold file present; doing nothing"); return 0
+    c, st = conf(), load(STATE, {})
+    reading, src = light()
+    print(f"light: {reading if reading is not None else 'unavailable'}"
+          f"{' via ' + src if src else ''}")
+    bl = brightness(reading, c, st)
+    print("backlight:", bl)
+    save(STATE, st)
+    return 1 if "FAILED" in bl else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

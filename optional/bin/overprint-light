@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""Measure room light. Prints "<0-255 reading> <source>", or exits 1.
+
+Prefers a real ambient light sensor. This machine has none (no IIO device, no
+ACPI0008), so it falls back to the webcam -- but only with exposure LOCKED. A
+UVC camera left on auto-exposure compensates for room brightness, so a dark room
+and a bright room both return mid-grey and the measurement is meaningless.
+"""
+import os, sys, glob, subprocess, statistics
+
+CAM = os.environ.get("OVERPRINT_LIGHT_DEVICE", "/dev/video0")
+EXPOSURE = 166          # fixed exposure; the scale below assumes this value
+W, H = 640, 480
+
+
+def als():
+    """A real ambient light sensor, if the kernel exposes one."""
+    for path in glob.glob("/sys/bus/iio/devices/*/in_illuminance_raw") + \
+                glob.glob("/sys/bus/iio/devices/*/in_illuminance_input"):
+        try:
+            lux = float(open(path).read().strip())
+            # map lux to the same 0-255 scale the camera path reports
+            return min(255.0, (lux / 400.0) * 255.0), "als"
+        except Exception:
+            continue
+    return None
+
+
+def ctl(dev, args):
+    return subprocess.run(["v4l2-ctl", "-d", dev] + args,
+                          capture_output=True, text=True, timeout=10)
+
+
+def get_ctrls(dev, names):
+    out = {}
+    r = ctl(dev, ["--get-ctrl", ",".join(names)])
+    for line in r.stdout.splitlines():
+        if ":" in line:
+            k, v = line.split(":", 1)
+            out[k.strip()] = v.strip()
+    return out
+
+
+CTRLS = ["auto_exposure", "exposure_time_absolute", "white_balance_automatic"]
+
+
+def camera():
+    if not os.path.exists(CAM):
+        return None
+    saved = get_ctrls(CAM, CTRLS)
+    # Never mutate a camera whose settings we could not read back. Without a
+    # saved value there is nothing to restore, so a failure here would leave the
+    # lens locked in manual exposure for every other application -- a video call
+    # included. A busy device is the common cause. Fall back to solar instead.
+    if not all(k in saved for k in CTRLS):
+        return None
+    try:
+        # The lock is the whole premise of this measurement: on auto-exposure the
+        # camera compensates for room brightness and every room reads mid-grey.
+        # If a control will not take, the number would be meaningless -- report
+        # nothing rather than something confident and wrong.
+        for arg in ("auto_exposure=1",
+                    f"exposure_time_absolute={EXPOSURE}",
+                    "white_balance_automatic=0"):
+            if ctl(CAM, ["--set-ctrl", arg]).returncode != 0:
+                return None
+        r = subprocess.run(
+            ["v4l2-ctl", "-d", CAM,
+             f"--set-fmt-video=width={W},height={H},pixelformat=YUYV",
+             "--stream-mmap", "--stream-count=6", "--stream-to=-"],
+            capture_output=True, timeout=20)
+        frame = W * H * 2
+        if len(r.stdout) < frame:
+            return None
+        last = r.stdout[-frame:]                 # discard settling frames
+        y = last[0::2]                           # YUYV: luma is every other byte
+        mean = sum(y) / len(y)
+        sample = y[::997]
+        sd = statistics.pstdev(sample) if len(sample) > 2 else 0.0
+        # A covered lens reads near-black AND near-flat. A genuinely dark room
+        # still has sensor noise, so variance separates the two cases.
+        if mean < 3.0 and sd < 1.2:
+            return None
+        return mean, "camera"
+    except Exception:
+        return None
+    finally:
+        # Restore the manual parameters first and hand the device back to
+        # automatic last; the reverse order lets the driver reject the exposure
+        # write because auto-exposure has already reclaimed it.
+        for k in ("exposure_time_absolute", "white_balance_automatic",
+                  "auto_exposure"):
+            if k not in saved:
+                continue
+            try:
+                ctl(CAM, ["--set-ctrl", f"{k}={saved[k]}"])
+            except Exception:
+                pass
+
+
+def read():
+    return als() or camera()
+
+
+if __name__ == "__main__":
+    r = read()
+    if r is None:
+        print("unavailable", file=sys.stderr)
+        sys.exit(1)
+    print(f"{r[0]:.1f} {r[1]}")

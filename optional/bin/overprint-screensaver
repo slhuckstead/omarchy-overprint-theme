@@ -1,0 +1,398 @@
+#!/usr/bin/env python3
+"""Overprint screensaver: a canopy, drifting.
+
+Three inks are laid down through an ordered dither, so every cell carries some
+combination of them and the field reads as one colour from across the room. The
+mix wanders continuously; nothing begins and nothing ends.
+
+The canvas is character cells. Upper half-blocks give two rows of pixels per
+cell, and because only eight colours can occur -- the eight subsets of three
+inks -- every possible cell is a precomputed escape string, which is what makes
+this cheap enough to run on battery.
+"""
+import os, sys, math, time, select, signal, termios, tty, tomllib
+
+THEME = os.path.expanduser("~/.local/state/omarchy/current/theme/overprint.toml")
+FALLBACK = dict(ground="#14161C", inks=["#0F4C81", "#FF5A4D", "#FFE800"], night=True)
+FPS = 6.0
+PAPER_BIAS = 0.58        # how readily bare ground wins a cell
+OVERPRINT_BAND = 0.10    # score gap within which a second ink also lands
+DITHER = 0.34            # dither strength; larger = wider screened transitions
+FULL_REDRAW = 300        # periodic full repaint, so no cell can go stale
+
+AMP1, AMP2 = 0.30, 0.171  # drift amplitudes
+
+# Feature size is the whole ballgame: too low a spatial frequency and one ink
+# simply fills the screen. K is set so a field is about 70 cells across, which
+# puts several inks on screen at once on a 200-cell canvas.
+K = 0.08976
+
+# base level, two spatial frequencies, two temporal frequencies, phase -- per ink
+FIELDS = [(0.46, K*1.00, K*0.61,  0.016, -0.011, 0.0),
+          (0.46, K*0.72, K*0.93, -0.012,  0.015, 2.1),
+          (0.46, K*0.58, K*1.17,  0.010,  0.008, 4.2)]
+
+try:
+    import numpy as np
+except ImportError:
+    sys.exit("overprint-screensaver needs numpy")
+
+# --------------------------------------------------------------------- modes
+# A mode is ONLY a way of scoring ink. Everything after it -- the ordered
+# dither, the argmax competition between paper and the three inks, the
+# overprint band where the runner-up also lands, the half-block compositing --
+# is shared. So a variation cannot break the press behaviour; it can only
+# change what the press is asked to print.
+#
+# Each returns three float fields (one per ink) for time t. Values sit around
+# PAPER_BIAS: above it the ink beats bare paper, below it the paper shows.
+
+TAU = 2 * math.pi
+
+
+def m_canopy(xs, ys, t):
+    """The original: two superposed gratings per ink, drifting slowly. Organic,
+    no direction you can name."""
+    return [base
+            + AMP1 * np.sin(k1*xs + k2*ys + w1*t*TAU + ph)
+            + AMP2 * np.sin(k2*xs*1.7 - k1*ys*1.3 + w2*t*TAU + ph*1.7)
+            for base, k1, k2, w1, w2, ph in FIELDS]
+
+
+def m_rollers(xs, ys, t):
+    """Ink rollers passing. Each plate is a directional band set at its own
+    angle, travelling at its own rate -- a press pass rather than a field."""
+    out = []
+    for i, (ang, k, w, ph) in enumerate(((0.28, K*0.85,  0.020, 0.0),
+                                         (1.05, K*0.70, -0.016, 2.1),
+                                         (2.02, K*0.95,  0.013, 4.2))):
+        u = xs*math.cos(ang) + ys*math.sin(ang)
+        out.append(0.46 + 0.34*np.sin(k*u - w*t*TAU + ph)
+                   + 0.10*np.sin(k*2.3*u + w*1.7*t*TAU))
+    return out
+
+
+def m_moire(xs, ys, t):
+    """Two nearly equal frequencies per plate, beating against each other. The
+    interference is the halftone rosette's own failure mode, run slowly."""
+    out = []
+    # The beat only shows if the carrier is fine relative to the canvas: at the
+    # canopy's own frequency two near-equal gratings just look like one grating.
+    # So carry at ~4x K and let a ~3% offset do the interference.
+    for i, (ang, eps, w, ph) in enumerate(((0.20, 0.031,  0.011, 0.0),
+                                           (1.30, 0.027, -0.009, 2.1),
+                                           (2.40, 0.035,  0.008, 4.2))):
+        u = xs*math.cos(ang) + ys*math.sin(ang)
+        v = -xs*math.sin(ang) + ys*math.cos(ang)
+        k = K*4.1
+        out.append(0.46 + 0.20*np.sin(k*u + w*t*TAU + ph)
+                        + 0.20*np.sin(k*(1+eps)*u + w*1.1*t*TAU + ph)
+                        + 0.14*np.sin(K*0.5*v - w*t*TAU + ph))
+    return out
+
+
+def m_tide(xs, ys, t):
+    """Strata. Broad horizontal bands rising, each plate at its own rate, with
+    a slow lateral warp so the seams are never straight."""
+    out = []
+    # Share one band frequency and separate the plates by a third of a period.
+    # Giving each its own frequency let whichever plate happened to sit high
+    # flood the screen; interleaving them is what makes strata rather than a
+    # wash.
+    # ys spans only ~29 units, so K*0.62 fits less than ONE band in the whole
+    # height -- the entire screen sat at one phase and whichever plate was
+    # highest flooded it. This puts about four bands on screen.
+    kb = K*9.5
+    for i, (w, warp) in enumerate(((0.014, 0.9), (-0.010, 1.4), (0.008, 0.6))):
+        ph = i * TAU / 3.0
+        warped = ys + warp*np.sin(K*0.31*xs + 0.006*t*TAU + ph)
+        out.append(0.46 + 0.30*np.sin(kb*warped + w*t*TAU + ph)
+                        + 0.10*np.sin(K*0.9*xs - w*0.7*t*TAU + ph))
+    return out
+
+
+def m_bloom(xs, ys, t):
+    """Rings opening from three points that wander. Closest to a print bleeding
+    outward from where the ink was laid."""
+    out = []
+    for i, (cx0, cy0, dx, dy, k, w, ph) in enumerate((
+            (0.30, 0.35,  0.017, -0.011, K*0.80,  0.015, 0.0),
+            (0.72, 0.60, -0.013,  0.015, K*0.66, -0.012, 2.1),
+            (0.48, 0.20,  0.010,  0.008, K*0.92,  0.010, 4.2))):
+        xmax = float(xs.max()) or 1.0
+        ymax = float(ys.max()) or 1.0
+        cx = xmax * (cx0 + 0.22*math.sin(dx*t*TAU + ph))
+        cy = ymax * (cy0 + 0.22*math.sin(dy*t*TAU + ph*1.3))
+        d = np.hypot(xs - cx, ys - cy)
+        out.append(0.46 + 0.34*np.sin(k*d - w*t*TAU + ph)
+                        + 0.08*np.sin(k*0.45*d + w*1.9*t*TAU))
+    return out
+
+
+MODES = {"canopy": m_canopy, "rollers": m_rollers, "moire": m_moire,
+         "tide": m_tide, "bloom": m_bloom}
+MODE = "canopy"          # replaced at startup; see __main__
+
+
+def ink_fields(xs, ys, t):
+    return MODES.get(MODE, m_canopy)(xs, ys, t)
+
+
+
+def load():
+    try:
+        with open(THEME, "rb") as f:
+            t = tomllib.load(f)
+        return dict(ground=t["ground"], inks=t["inks"], night=t.get("night", True))
+    except Exception:
+        return FALLBACK
+
+
+def hex2rgb(h):
+    h = h.lstrip("#")
+    return np.array([int(h[i:i+2], 16) for i in (0, 2, 4)], float) / 255.0
+
+
+def bayer(n=8):
+    m = np.array([[0, 2], [3, 1]], float)
+    while m.shape[0] < n:
+        m = np.block([[4*m, 4*m + 2], [4*m + 3, 4*m + 1]])
+    return (m + 0.5) / m.size
+
+
+def ink_colors(ground, inks, night):
+    """The eight colours this press can put in a cell, indexed by ink subset."""
+    out = []
+    for k in range(8):
+        c = ground.copy()
+        for i in range(3):
+            if k & (1 << i):
+                c = 1 - (1 - c) * (1 - inks[i]) if night else c * inks[i]
+        out.append(np.clip(c, 0, 1))
+    return out
+
+
+
+def term_size():
+    """Terminal size, or the environment's idea of it.
+
+    os.get_terminal_size() raises OSError when there is no controlling terminal
+    -- piped, redirected, or run headless -- and this was called in two places,
+    only one of which was guarded.
+    """
+    try:
+        return os.get_terminal_size()
+    except OSError:
+        return os.terminal_size((int(os.environ.get("COLUMNS", 200)),
+                                 int(os.environ.get("LINES", 50))))
+
+
+def cells(S, band=None):
+    """Resolve scored plates into a per-pixel ink-subset bitmask.
+
+    Shared by the live loop and by --dump. It used to be written out twice, which
+    is precisely why the three-ink cell was reported as unreachable: the fix went
+    into one copy and the measurement read the other.
+
+    Inks COMPETE for each pixel rather than accumulating: score paper and each
+    ink, take the winner, and let any runner-up inside `band` land as well. Two
+    close scores give a two-ink overprint along a seam; three give a true
+    three-ink one.
+    """
+    band = OVERPRINT_BAND if band is None else band
+    order = np.argsort(-S, axis=0)
+    smax = np.take_along_axis(S, order[0][None], axis=0)[0]
+    present = np.zeros(S.shape[1:], np.int32)
+    for rank in range(3):                      # winner, runner-up, third
+        idx = order[rank]
+        val = np.take_along_axis(S, idx[None], axis=0)[0]
+        near = (smax - val) < band if rank else np.ones_like(smax, bool)
+        present |= np.where(near & (idx > 0),
+                            1 << np.clip(idx - 1, 0, 2), 0).astype(np.int32)
+    return present
+
+
+def main():
+    cfg = load()
+    ground = hex2rgb(cfg["ground"])
+    inks = [hex2rgb(h) for h in cfg["inks"]]
+    cols8 = ink_colors(ground, inks, cfg["night"])
+    rgb8 = [tuple(int(round(v*255)) for v in c) for c in cols8]
+
+    # every (upper, lower) pair, precomputed once
+    # colour escape per (upper, lower) pair, glyph emitted separately so a run
+    # of identical cells costs one escape and then one character each
+    ESC = [f"\x1b[38;2;{a[0]};{a[1]};{a[2]}m\x1b[48;2;{b[0]};{b[1]};{b[2]}m"
+           for a in rgb8 for b in rgb8]
+
+    fd = sys.stdin.fileno()
+    try:
+        old = termios.tcgetattr(fd)
+        tty.setcbreak(fd)
+    except termios.error:
+        old = None
+
+    def restore(*_):
+        sys.stdout.write("\x1b[0m\x1b[?25h\x1b[2J\x1b[H")
+        sys.stdout.flush()
+        if old is not None:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        os._exit(0)
+
+    for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT):
+        signal.signal(s, restore)
+
+    g = tuple(int(round(v*255)) for v in ground)
+    sys.stdout.write(f"\x1b]11;rgb:{g[0]:02x}/{g[1]:02x}/{g[2]:02x}\x07")
+    sys.stdout.write("\x1b[?25l\x1b[2J")
+
+    # A terminal allocates its pty at 80x24 and only resizes once the compositor
+    # has told the window how big it is. Measuring before that paints a tiny
+    # canvas into the corner of a fullscreen window.
+    deadline = time.time() + 2.0
+    while time.time() < deadline and tuple(term_size()) == (80, 24):
+        time.sleep(0.02)
+
+    # None, not (0, 0): a terminal that has not been sized yet reports 0x0,
+    # which EQUALS a (0, 0) sentinel, so the branch below never ran and every
+    # variable it defines stayed unbound -- crashing the screensaver with
+    # UnboundLocalError on startup, every time it was launched.
+    watch_stdin = True
+    size = None
+    B = bayer(8)
+    t0 = time.time()
+    while True:
+        ts = term_size()
+        # 0x0 means the compositor has not sized the window yet; building a
+        # canvas from it would make empty arrays. Wait for a real size.
+        if ts.columns < 2 or ts.lines < 2:
+            time.sleep(0.05)
+            continue
+        if (ts.columns, ts.lines) != size:
+            size = (ts.columns, ts.lines)
+            W, Hc = size
+            Hp = Hc * 2
+            yy, xx = np.mgrid[0:Hp, 0:W].astype(np.float32)
+            # cells are about twice as tall as wide; correct so the drift is round
+            xs, ys = xx * 0.5, yy * 0.25
+            base_thr = np.tile(B, (Hp // 8 + 1, W // 8 + 1))[:Hp, :W]
+            # one dither per ink, rolled apart so the three choices decorrelate
+            jit = [((np.roll(np.roll(base_thr, 3*i, 0), 5*i, 1)) - 0.5) * DITHER
+                   for i in range(3)]
+            prev = None
+            frames = 0
+            sys.stdout.write("\x1b[2J")
+
+        t = time.time() - t0
+
+        # Inks COMPETE for each cell rather than accumulating in it. Independent
+        # per-ink coverage stacks all three wherever they happen to overlap, which
+        # turns a light theme almost black; a spot-colour print instead has one
+        # ink solid across a region and hands over to the next at a dithered
+        # boundary. So: score paper and each ink, jitter the scores with a
+        # decorrelated dither, and take the winner. Where the runner-up is close,
+        # both inks land and you get a true overprint band along the seam.
+        scores = [np.full((Hp, W), PAPER_BIAS, np.float32)]
+        for i, f in enumerate(ink_fields(xs, ys, t)):
+            scores.append((f + jit[i]).astype(np.float32))
+        S = np.stack(scores)
+
+        present = cells(S)
+
+        idx = present[0::2] * 8 + present[1::2]
+
+        out, cur = [], -1
+        for r in range(idx.shape[0]):
+            row = idx[r]
+            if prev is None:
+                runs = [(0, W)]
+            else:
+                d = np.flatnonzero(row != prev[r])
+                if d.size == 0:
+                    continue
+                # merge runs separated by a short unchanged gap; repositioning the
+                # cursor costs more bytes than redrawing four untouched cells
+                brk = np.flatnonzero(np.diff(d) > 4)
+                starts = np.concatenate(([0], brk + 1))
+                ends = np.concatenate((brk + 1, [d.size]))
+                runs = [(int(d[a]), int(d[b-1]) + 1) for a, b in zip(starts, ends)]
+            line = row.tolist()
+            for a, b in runs:
+                out.append(f"\x1b[{r+1};{a+1}H")
+                for v in line[a:b]:
+                    if v != cur:
+                        out.append(ESC[v]); cur = v
+                    out.append("▀")
+        if out:
+            sys.stdout.write("".join(out))
+            sys.stdout.flush()
+        frames += 1
+        prev = None if frames % FULL_REDRAW == 0 else idx
+
+        if watch_stdin and select.select([sys.stdin], [], [], max(0.0, 1.0/FPS))[0]:
+            # Readable does NOT mean a key was pressed: a closed or redirected
+            # stdin is permanently readable, which used to exit after a single
+            # frame any time this ran without a terminal. Read it and see -- a
+            # byte is a real keypress, empty is EOF and there is no keyboard to
+            # watch, in which case stop polling rather than spinning on it.
+            try:
+                if os.read(fd, 1):
+                    restore()
+                watch_stdin = False
+            except OSError:
+                watch_stdin = False
+        elif not watch_stdin:
+            time.sleep(max(0.0, 1.0/FPS))
+
+
+def dump(path, W, Hc, t, cfg=None):
+    """Render one frame to a PNG at cell resolution. Tuning aid, not used at runtime."""
+    import zlib, struct
+    cfg = cfg or load()
+    ground = hex2rgb(cfg["ground"]); inks = [hex2rgb(h) for h in cfg["inks"]]
+    cols8 = ink_colors(ground, inks, cfg["night"])
+    Hp = Hc * 2
+    yy, xx = np.mgrid[0:Hp, 0:W].astype(np.float32)
+    xs, ys = xx * 0.5, yy * 0.25
+    base_thr = np.tile(bayer(8), (Hp//8+1, W//8+1))[:Hp, :W]
+    jit = [((np.roll(np.roll(base_thr, 3*i, 0), 5*i, 1)) - 0.5) * DITHER for i in range(3)]
+    scores = [np.full((Hp, W), PAPER_BIAS, np.float32)]
+    for i, f in enumerate(ink_fields(xs, ys, t)):
+        scores.append((f + jit[i]).astype(np.float32))
+    S = np.stack(scores)
+    present = cells(S)
+    lut = np.array([(c*255).round() for c in cols8], np.uint8)
+    img = lut[present]
+    img = np.repeat(np.repeat(img, 3, 0), 6, 1)
+    h, w, _ = img.shape
+    raw = b"".join(b"\x00" + img[y].tobytes() for y in range(h))
+    ch = lambda t_, d: struct.pack(">I", len(d)) + t_+d + struct.pack(">I", zlib.crc32(t_+d))
+    open(path, "wb").write(b"\x89PNG\r\n\x1a\n"
+        + ch(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+        + ch(b"IDAT", zlib.compress(raw, 6)) + ch(b"IEND", b""))
+    frac = [float((present == k).mean()) for k in range(8)]
+    return frac
+
+
+if __name__ == "__main__":
+    import random
+    args = sys.argv[1:]
+
+    # A different variation each time the screen sleeps. Explicit --mode wins,
+    # for tuning and for anyone who wants only one of them.
+    if "--mode" in args:
+        i = args.index("--mode")
+        want = args[i + 1] if i + 1 < len(args) else ""
+        if want not in MODES:
+            sys.exit(f"unknown mode {want!r}; have: {', '.join(sorted(MODES))}")
+        MODE = want
+        del args[i:i + 2]
+    else:
+        MODE = random.choice(sorted(MODES))
+
+    if args and args[0] == "--list":
+        print("\n".join(sorted(MODES)))
+    elif args and args[0] == "--dump":
+        print(dump(args[1], 200, 58, float(args[2]) if len(args) > 2 else 0.0))
+    else:
+        main()

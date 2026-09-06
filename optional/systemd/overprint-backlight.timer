@@ -1,0 +1,12 @@
+[Unit]
+Description=Check room light for backlight adaptation
+
+[Timer]
+# Every ten minutes on the clock. OnUnitActiveSec leaves NEXT unscheduled after
+# a run when the unit is a oneshot, which silently stops the loop.
+OnCalendar=*:0/10
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

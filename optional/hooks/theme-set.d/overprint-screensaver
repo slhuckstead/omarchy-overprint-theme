@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Keep the screensaver plate in step with the active theme.
+#
+# This is a theme-set hook (~/.config/omarchy/hooks/theme-set.d/, run by
+# omarchy-hook from omarchy-theme-set) because it is the only mechanism here
+# that actually survives: it lives in user config, /etc/skel ships no
+# non-.sample file in this directory to clobber it, and unlike a PATH shadow it
+# does not have to win against /usr/share/omarchy/bin.
+set -uo pipefail
+theme="${1:-}"
+plate="$HOME/.config/omarchy/branding/screensaver.txt"
+default="/etc/skel/.config/omarchy/branding/screensaver.txt"
+
+shopt -s nocasematch
+if [[ $theme == *overprint* ]]; then
+  "$HOME/.local/bin/overprint-screensaver-plate" >/dev/null
+elif [[ -f $default ]]; then
+  # Hand the plate back rather than leaving another theme showing our wordmark.
+  cp -f "$default" "$plate"
+fi

@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""Write the Overprint screensaver plate.
+
+Omarchy's idle service hardcodes `omarchy-launch-screensaver`, which runs `ttfx`
+against ~/.config/omarchy/branding/screensaver.txt. There is no supported way to
+substitute a different screensaver program -- `idle.screensaverCommand` in
+shell.json is not a real key, and /usr/share/omarchy/bin sits ahead of
+~/.local/bin on PATH, so shadowing the launcher cannot work either. What IS ours
+is the plate it renders, so that is what this writes.
+
+ttfx applies its own effects using the terminal's palette, which is the theme's
+palette, so this follows the theme without carrying any colour of its own.
+"""
+import os
+
+FONT = {
+ "O": ["01110","10001","10001","10001","10001","10001","01110"],
+ "V": ["10001","10001","10001","10001","10001","01010","00100"],
+ "E": ["11111","10000","10000","11110","10000","10000","11111"],
+ "R": ["11110","10001","10001","11110","10100","10010","10001"],
+ "P": ["11110","10001","10001","11110","10000","10000","10000"],
+ "I": ["11111","00100","00100","00100","00100","00100","11111"],
+ "N": ["10001","11001","10101","10101","10011","10001","10001"],
+ "T": ["11111","00100","00100","00100","00100","00100","00100"],
+}
+BLOCK, GAP = "██", "  "        # cells are ~2:1 tall, so double the width
+
+def word(s):
+    rows = []
+    for r in range(7):
+        out = []
+        for ch in s:
+            out.append("".join(BLOCK if b == "1" else GAP for b in FONT[ch][r]))
+        rows.append(GAP.join(out))
+    return rows
+
+def main():
+    lines = word("OVERPRINT")
+    width = max(len(l) for l in lines)
+    sub = "THREE INKS  ·  ONE PRESS"
+    lines += ["", sub.center(width)]
+    dest = os.path.expanduser("~/.config/omarchy/branding/screensaver.txt")
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    tmp = dest + ".tmp"
+    with open(tmp, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    os.replace(tmp, dest)
+    print(f"wrote {dest}")
+
+if __name__ == "__main__":
+    main()

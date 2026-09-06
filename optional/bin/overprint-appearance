@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Control Overprint's backlight adaptation.
+#
+#   overprint-appearance              show current setting and state
+#   overprint-appearance on | off     backlight adaptation on or off
+#   overprint-appearance hold         suspend adaptation entirely
+#   overprint-appearance resume       resume it
+#
+# `light`, `dark` and `auto` are gone: Overprint is one theme now, so there is
+# no day/slate/night level left to aim at. Pick a wallpaper instead --
+# `omarchy theme background` cycles the 72 in this theme.
+set -uo pipefail
+CFGDIR="$HOME/.config/overprint"
+CONF="$CFGDIR/backlight.conf"
+HOLD="$CFGDIR/hold"
+STATE="$CFGDIR/state.json"
+
+# Write a key whether or not it is already present. The old version used a bare
+# `sed s/^KEY=.*/` and reported success even when the key was absent and nothing
+# was written -- so a command could print exactly what you asked for and change
+# nothing at all.
+set_key() {
+  local k=$1 v=$2
+  mkdir -p "$CFGDIR"; touch "$CONF"
+  if grep -qE "^[[:space:]]*$k[[:space:]]*=" "$CONF"; then
+    sed -i -E "s|^[[:space:]]*$k[[:space:]]*=.*|$k=$v|" "$CONF"
+  else
+    printf '%s=%s\n' "$k" "$v" >> "$CONF"
+  fi
+  grep -qE "^$k=$v$" "$CONF" || { echo "failed to set $k" >&2; return 1; }
+}
+
+case "${1:-status}" in
+  on|off)
+    set_key BRIGHTNESS "$1" || exit 1
+    echo "BRIGHTNESS=$1"
+    exec "$HOME/.local/bin/overprint-adapt"
+    ;;
+  hold)   touch "$HOLD"; echo "adaptation suspended" ;;
+  resume) rm -f "$HOLD"; echo "adaptation resumed"; exec "$HOME/.local/bin/overprint-adapt" ;;
+  status)
+    grep -E "^(BRIGHTNESS|BRIGHT_MIN|BRIGHT_MAX|BRIGHT_KNEE|MANUAL_HOLD)=" "$CONF" 2>/dev/null \
+      || echo "BRIGHTNESS=on (defaults)"
+    echo "theme:  $(omarchy theme current 2>/dev/null)"
+    echo -n "light:  "; "$HOME/.local/bin/overprint-light" || echo "unavailable"
+    # Report the state the adapter is actually acting on, so a stuck system
+    # explains itself instead of needing the journal.
+    if [[ -f $STATE ]]; then
+      python3 - "$STATE" <<'PY' 2>/dev/null || true
+import json, sys, time
+st = json.load(open(sys.argv[1]))
+if st.get("bl_set_pct") is not None:
+    print(f"panel:  last set to {st['bl_set_pct']:.0f}%")
+mu = st.get("manual_until", 0)
+if mu > time.time():
+    print(f"HELD:   manual brightness override, {(mu-time.time())/60:.0f}m left")
+PY
+    fi
+    [[ -f $HOLD ]] && echo "HELD:   overprint-appearance resume" || true
+    ;;
+  auto|light|dark)
+    echo "Overprint is one theme now -- there is no $1 level to switch to." >&2
+    echo "Wallpapers: omarchy theme background" >&2
+    exit 2 ;;
+  *) echo "usage: overprint-appearance [on|off|hold|resume|status]" >&2; exit 2 ;;
+esac

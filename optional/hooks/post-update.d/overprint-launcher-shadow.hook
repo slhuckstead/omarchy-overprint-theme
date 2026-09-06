@@ -1,0 +1,29 @@
+#!/bin/bash
+#
+# Rebuild Overprint's screensaver launcher shadow after an Omarchy update.
+#
+# The shadow is a copy of Omarchy's own omarchy-launch-screensaver with the
+# inner renderer swapped. An update ships a new packaged launcher, and the
+# stale shadow then keeps running whatever the old one said -- so this has to
+# re-derive it from the new upstream copy every time.
+#
+# omarchy-hook swallows a failing hook into a line of update output that
+# scrolls past, and the symptom of failure is silent: the screensaver quietly
+# falls back to the stock ttfx wordmark. So failure gets a notification.
+set -uo pipefail
+
+GEN="$HOME/.local/bin/overprint-make-launcher-shadow"
+
+[[ -x $GEN ]] || exit 0   # Overprint not installed here; nothing to do.
+
+if out=$("$GEN" 2>&1); then
+  # Only speak up when something actually changed.
+  [[ $out == *regenerated* ]] && omarchy-notification-send -u low -g 󱄄 \
+    "Overprint screensaver" "Launcher shadow rebuilt for the new Omarchy."
+  exit 0
+fi
+
+omarchy-notification-send -u critical -g 󱄄 \
+  "Overprint screensaver broken" \
+  "Launcher shadow could not be rebuilt; the stock screensaver will run instead. ${out}"
+exit 1

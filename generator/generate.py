@@ -752,7 +752,11 @@ def dist(outdir, force=False, width=None, previews=False, level=None):
     # 2880x1800 matches the first-party previews (solitude, last-horizon).
     # Ours shipped at 1280x800, so the picker card was visibly softer than every
     # theme beside it on a HiDPI panel -- a gap that costs nothing to close.
-    want = [("preview.png", "2880x1800"), ("preview-unlock.png", "2880x1800")]
+    # 1920x1080 for preview-unlock.png, matching solitude / last-horizon / lupine.
+    # It is the Plymouth PICKER thumbnail (omarchy-plymouth-switcher symlinks it),
+    # a different job from preview.png, and it was shipping at the same 2880x1800
+    # as the desktop card by accident.
+    want = [("preview.png", "2880x1800"), ("preview-unlock.png", "1920x1080")]
     todo = [] if hero is None else [(f, r) for f, r in want
             if previews or not os.path.exists(os.path.join(outdir, f))]
     for f, r in todo:
@@ -873,12 +877,18 @@ def _finish(d, bg, press, level, presses, levels, n, cols):
     # by 1280x800 hero crops by a one-second palette rebuild. dist() has always
     # guarded its README this way; the same rule belongs here.
     # Force a rebuild from the hero with --previews.
+    # Same sizes dist() uses, and for the same reason: 1280x800 was visibly
+    # softer than every first-party theme beside it in the picker on a HiDPI
+    # panel. That was fixed in dist() and NOT here, so a local build quietly
+    # reintroduced the soft card the export had already cured.
+    # -resize fits INSIDE the box; ^ + extent fills it.
     force_previews = "--previews" in sys.argv[1:]
     written = []
-    for f in ("preview.png", "preview-unlock.png"):
+    for f, r in (("preview.png", "2880x1800"), ("preview-unlock.png", "1920x1080")):
         dst = os.path.join(d, f)
         if force_previews or not os.path.exists(dst):
-            subprocess.run(["magick", hero, "-resize", "1280x800", dst], check=True)
+            subprocess.run(["magick", hero, "-resize", r + "^", "-gravity", "center",
+                            "-extent", r, dst], check=True)
             written.append(f)
         else:
             print(f"  kept existing {f} (--previews to rebuild from the hero)")

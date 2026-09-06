@@ -153,6 +153,21 @@ show_plate() {
   printf '\n  Every slot is an ink, a two-ink overprint,\n'
   printf '  or all three, retargeted in OKLab until it\n'
   printf '  clears its contrast floor.\n\n'
+  # The names are ANSI SLOTS, not descriptions of appearance. On the paper
+  # ground that is startling -- "white" renders near-black, because ANSI white
+  # is the foreground slot and nothing light clears contrast on a light sheet.
+  # Unsaid, the card reads as a bug to anyone who does not know the convention.
+  local night; night=$(sed -n 's/^night = \(.*\)/\1/p' "$d/overprint.toml" 2>/dev/null)
+  if [[ $night == false ]]; then
+    printf '  Names are ANSI slots, not appearances. On\n'
+    printf '  paper every slot must go DARK to clear its\n'
+    printf '  target: there is no light yellow that reads\n'
+    printf '  on a light sheet.\n\n'
+  else
+    printf '  Names are ANSI slots, not appearances. The\n'
+    printf '  same slot is a different colour on each\n'
+    printf '  ground, solved against that ground alone.\n\n'
+  fi
 }
 
 cat <<EOF
@@ -161,7 +176,7 @@ cat <<EOF
 
     1. Super+4  (or wherever your scene is)
     2. Click the window that should be ACTIVE — it wears the three-ink border
-    3. Leave the pointer somewhere harmless and wait
+    3. Wait -- the pointer is hidden for the shot, so it does not matter
 
   Everything on this monitor is captured. Close mail, chat, browser tabs and
   anything showing a password, a token or a folder you would not publish.
@@ -179,47 +194,80 @@ done
 printf "\r%-20s\r" ""
 sleep 0.6
 
-# THE GUARD. Check what the monitor is actually showing, at the last possible
-# moment, and refuse rather than capture the wrong thing. Writing nothing is
-# always recoverable; publishing the wrong desktop is not.
-if [[ -n $WS ]]; then
-  live=$(hyprctl activeworkspace -j | jq -r '.id')
-  if [[ $live != "$WS" ]]; then
-    echo >&2
-    echo "  REFUSING TO CAPTURE." >&2
-    echo "  Expected workspace $WS; the monitor is showing workspace $live." >&2
-    hyprctl clients -j | jq -r --arg w "$live" \
-      '.[] | select(.workspace.id == ($w|tonumber)) | "    would have captured: " + .class + "  " + .title' >&2
-    echo >&2
-    echo "  Nothing was written." >&2
-    exit 3
-  fi
-fi
+TMP=$(mktemp -d)
 
-# An empty workspace is never a picker card. Switching to the right workspace
-# and finding nothing there is exactly as wrong as capturing the wrong one, and
-# it is the failure the assertion alone cannot see -- the first version of this
-# guard cheerfully shot a bare workspace 9 because that is what it was told to
-# assert. Bare desktops need --allow-empty and a deliberate choice.
+# Hyprland composites the pointer INTO the surface, so grim catches it even
+# though it is not passed -c. That is why the instructions above ask you to park
+# the pointer somewhere harmless -- but it is a workaround for something the
+# compositor will simply turn off, and "somewhere harmless" fails the moment the
+# pointer is over the pane you most want photographed. It happened: a night card
+# came out with an arrow sitting in the middle of the code.
+#
+# Read the current value rather than assuming false, in case someone runs a
+# hidden cursor on purpose, and restore on EXIT so a failure mid-capture does
+# not leave the pointer invisible.
+CURSOR_WAS=$(hyprctl getoption cursor:invisible 2>/dev/null | awk '/^bool:/{print $2}')
+[[ $CURSOR_WAS == true || $CURSOR_WAS == false ]] || CURSOR_WAS=false
+restore_cursor() {
+  hyprctl eval "hl.config({ cursor = { invisible = $CURSOR_WAS } })" >/dev/null 2>&1
+}
+# Park the pointer in a corner as well. Hiding it is what actually works, but
+# it is a compositor redraw and it is not instant -- a 0.4s wait was not enough
+# and a light card came out with an arrow through the middle of the code. If the
+# hide has not landed by the time grim fires, a pointer in the corner is a
+# blemish; a pointer over the focused pane ruins the shot.
+CURSORPOS_WAS=$(hyprctl cursorpos 2>/dev/null | tr -d ' ')
+restore_cursor() {
+  hyprctl eval "hl.config({ cursor = { invisible = $CURSOR_WAS } })" >/dev/null 2>&1
+  if [[ $CURSORPOS_WAS =~ ^([0-9]+),([0-9]+)$ ]]; then
+    hyprctl dispatch "hl.dsp.cursor.move({ x = ${BASH_REMATCH[1]}, y = ${BASH_REMATCH[2]} })" >/dev/null 2>&1
+  fi
+}
+trap 'rm -rf "$TMP"; restore_cursor' EXIT
+
+# (2,2) put the pointer on the bar's workspace indicator, which is the likeliest
+# thing that moved the session to another workspace mid-capture. Park it in the
+# bottom-right corner instead -- furthest from anything interactive.
+read -r _lw _lh < <(hyprctl monitors -j | jq -r '.[]|select(.focused)|"\(.width/.scale|floor) \(.height/.scale|floor)"')
+hyprctl dispatch "hl.dsp.cursor.move({ x = $((_lw-2)), y = $((_lh-2)) })" >/dev/null 2>&1
+hyprctl eval 'hl.config({ cursor = { invisible = true } })' >/dev/null 2>&1
+sleep 1.5
+
+# THE GUARD, and it must be the LAST thing before grim. An earlier version put it
+# before the cursor setup, which left a 1.5s hole between checking and shooting --
+# and a capture went through that hole and photographed the wrong workspace. Check
+# what the monitor is showing at the last possible instant, and refuse rather than
+# write. Writing nothing is always recoverable; publishing the wrong desktop is not.
 live=$(hyprctl activeworkspace -j | jq -r '.id')
 nwin=$(hyprctl clients -j | jq --arg w "$live" '[.[] | select(.workspace.id == ($w|tonumber))] | length')
+if [[ -n $WS && $live != "$WS" ]]; then
+  echo >&2; echo "  REFUSING TO CAPTURE." >&2
+  echo "  Expected workspace $WS; the monitor is showing workspace $live." >&2
+  hyprctl clients -j | jq -r --arg w "$live" \
+    '.[] | select(.workspace.id == ($w|tonumber)) | "    would have captured: " + .class + "  " + .title' >&2
+  echo >&2; echo "  Nothing was written." >&2
+  exit 3
+fi
 if (( nwin == 0 )) && [[ ${ALLOW_EMPTY:-0} != 1 ]]; then
-  echo >&2
-  echo "  REFUSING TO CAPTURE: workspace $live has no windows." >&2
-  echo "  A card of a bare desktop shows nothing the picker is asking about." >&2
-  echo "  Arrange a scene, or pass --allow-empty if that is really what you want." >&2
-  echo "  Nothing was written." >&2
+  echo >&2; echo "  REFUSING TO CAPTURE: workspace $live has no windows." >&2
+  echo "  Arrange a scene, or pass --allow-empty. Nothing was written." >&2
   exit 4
 fi
-
-# Always leave a record of what was in frame, whether or not --workspace was
-# given. A card you cannot audit after the fact is a card you cannot trust.
 echo "  capturing workspace $live ($nwin window(s)):"
 hyprctl clients -j | jq -r --arg w "$live" \
   '.[] | select(.workspace.id == ($w|tonumber)) | "    " + .class + "  " + .title'
 
-TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 grim -o "$MON" "$TMP/shot.png" || die "grim failed"
+
+# And check AGAIN afterwards. grim takes time; if the workspace moved while the
+# shutter was open the image is untrustworthy even though the pre-check passed.
+after=$(hyprctl activeworkspace -j | jq -r '.id')
+if [[ -n $WS && $after != "$WS" ]]; then
+  echo >&2; echo "  DISCARDING: workspace changed to $after during the capture." >&2
+  echo "  Nothing was written." >&2
+  exit 5
+fi
+restore_cursor
 
 # 2880x1800 is what solitude and last-horizon ship. Fill the box rather than fit
 # inside it, or a 16:9 panel silently yields 2880x1620.

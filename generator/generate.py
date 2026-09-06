@@ -313,6 +313,53 @@ def shell_toml(cols):
     return SHELL.format(active_border=cols["hyprland_active_border"], **cols)
 
 
+def wordmark(cols, path, w=800, h=188, text="OVERPRINT"):
+    """The plymouth boot logo. NOT a wallpaper.
+
+    unlock.png is misleadingly named: its only consumer is
+    omarchy-plymouth-set-by-theme, which installs it verbatim as plymouth's
+    logo.png. Plymouth centres that at NATIVE SIZE and then places every other
+    element relative to it:
+
+        entry.y = logo.y + logo.height + 40      (omarchy.script:112)
+
+    So shipping the hero wallpaper here -- which this did -- put a full-screen
+    image in the logo slot and pushed the passphrase box, the lock icon, the
+    password bullets and the progress bar clean off the bottom of the screen.
+    On an encrypted disk that means typing the passphrase blind, and it fails
+    silently because plymouth accepts the keystrokes either way. Every
+    first-party theme ships a small transparent wordmark (800x188); so do we.
+
+    Drawn with the CONTRAST-SOLVED palette rather than the raw inks, for the
+    same reason everything else here is: raw #FFE800 on paper is invisible.
+    """
+    font = None
+    for want in ("Libre Franklin Black", "Libre Franklin", "Liberation Sans Bold",
+                 "DejaVu Sans Bold", "sans-serif"):
+        try:
+            r = subprocess.run(["fc-match", "-f", "%{file}", want],
+                               capture_output=True, text=True, timeout=5)
+            if r.returncode == 0 and r.stdout.strip() and os.path.exists(r.stdout.strip()):
+                font = r.stdout.strip(); break
+        except Exception:
+            continue
+    if not font:
+        print("  no usable font for the wordmark; unlock.png not written", file=sys.stderr)
+        return False
+    # Press order, and the misregistration IS the point -- the same deliberate
+    # offset the wallpapers use, at wordmark scale.
+    layers = [(-4, -2, cols["blue"]), (0, 0, cols["red"]), (4, 2, cols["yellow"])]
+    args = ["magick", "-size", f"{w}x{h}", "xc:none"]
+    for dx, dy, col in layers:
+        args += ["(", "-size", f"{w}x{h}", "xc:none", "-font", font,
+                 "-pointsize", "96", "-fill", col, "-gravity", "center",
+                 "-annotate", f"{dx:+d}{dy:+d}", text, ")",
+                 "-compose", "over", "-composite"]
+    args += ["-define", "png:exclude-chunk=time", path]
+    subprocess.run(args, check=True)
+    return True
+
+
 def toml(cols, inks):
     out = [HEADER.format(inks="  ".join(inks)), ""]
     for k in KEY_ORDER:
@@ -687,9 +734,11 @@ def dist(outdir, force=False, width=None, previews=False, level=None):
     shutil.rmtree(stage, ignore_errors=True)
     print(f"  {kept} unchanged, {adopted} written")
 
-    # preview.png is the theme's card in the picker, unlock.png backs the lock
-    # screen, and preview-unlock.png is what omarchy-plymouth-list gates on --
-    # without it the theme cannot style boot or login at all.
+    # preview.png is the theme's card in the picker and preview-unlock.png is
+    # what omarchy-plymouth-list gates on. unlock.png is NOT a lock-screen image
+    # despite the name -- it is plymouth's LOGO, drawn at native size with the
+    # passphrase box positioned beneath it, so it is built by wordmark() below
+    # rather than cropped from the hero. See that function.
     #
     # These are only rebuilt when missing, or on --previews. Regenerating them
     # every run produces a few MB of diff that is resize and quantise noise off
@@ -703,8 +752,7 @@ def dist(outdir, force=False, width=None, previews=False, level=None):
     # 2880x1800 matches the first-party previews (solitude, last-horizon).
     # Ours shipped at 1280x800, so the picker card was visibly softer than every
     # theme beside it on a HiDPI panel -- a gap that costs nothing to close.
-    want = [("preview.png", "2880x1800"), ("unlock.png", "2560x1600"),
-            ("preview-unlock.png", "2880x1800")]
+    want = [("preview.png", "2880x1800"), ("preview-unlock.png", "2880x1800")]
     todo = [] if hero is None else [(f, r) for f, r in want
             if previews or not os.path.exists(os.path.join(outdir, f))]
     for f, r in todo:
@@ -717,6 +765,9 @@ def dist(outdir, force=False, width=None, previews=False, level=None):
                         "-define", "png:compression-level=9",
                         os.path.join(outdir, f)], check=False)
     print(f"  previews: {len(todo)} written, {len(want)-len(todo)} kept")
+
+    if wordmark(cols, os.path.join(outdir, "unlock.png")):
+        print("  unlock.png: wordmark written (plymouth logo, not a wallpaper)")
 
     open(os.path.join(outdir, "icons.theme"), "w").write(ICONS[level] + "\n")
 
@@ -793,9 +844,9 @@ def _finish(d, bg, press, level, presses, levels, n, cols):
         nvar=len(compose.VARIANTS), presses=", ".join(presses),
         levels=", ".join(levels)))
 
-    # preview.png is the theme's card in the picker. unlock.png backs the lock
-    # screen, and preview-unlock.png is what omarchy-plymouth-list gates on --
-    # without it this theme cannot style the boot or login screen at all.
+    # preview.png is the theme's card in the picker and preview-unlock.png is
+    # what omarchy-plymouth-list gates on. unlock.png is plymouth's LOGO, built
+    # by wordmark() -- not a lock-screen image, whatever the name suggests.
     # The hero is harbour-night-4-modulor, which is NOT one of the SHIP twelve
     # (those carry harbour-SLATE-4-modulor), so after the split it lives in the
     # user directory. Look in both rather than assuming.
@@ -815,13 +866,31 @@ def _finish(d, bg, press, level, presses, levels, n, cols):
                 hero = None
             else:
                 hero = os.path.join(bg, pngs[0])
-    subprocess.run(["magick", hero, "-resize", "1280x800",
-                    os.path.join(d, "preview.png")], check=True)
-    shutil.copy(hero, os.path.join(d, "unlock.png"))
-    subprocess.run(["magick", hero, "-resize", "1280x800",
-                    os.path.join(d, "preview-unlock.png")], check=True)
+    # NEVER clobber a curated preview. preview.png is a SCREENSHOT of a working
+    # desktop made by overprint-make-preview, and regenerating it from the hero
+    # -- which this did on every run, including --palette -- silently destroys
+    # it. That happened: three cards, built by hand over an afternoon, replaced
+    # by 1280x800 hero crops by a one-second palette rebuild. dist() has always
+    # guarded its README this way; the same rule belongs here.
+    # Force a rebuild from the hero with --previews.
+    force_previews = "--previews" in sys.argv[1:]
+    written = []
+    for f in ("preview.png", "preview-unlock.png"):
+        dst = os.path.join(d, f)
+        if force_previews or not os.path.exists(dst):
+            subprocess.run(["magick", hero, "-resize", "1280x800", dst], check=True)
+            written.append(f)
+        else:
+            print(f"  kept existing {f} (--previews to rebuild from the hero)")
+    wordmark(cols, os.path.join(d, "unlock.png"))
 
-    for f in ("preview.png", "preview-unlock.png", "unlock.png"):
+    # Only what was actually written this run. Re-quantising a KEPT file changes
+    # its bytes without changing a pixel -- magick -colors 256 picks the same
+    # colours in a different PLTE order every time -- which is exactly the
+    # meaningless churn dist() already goes to trouble to avoid.
+    # unlock.png is excluded entirely: wordmark() writes it small and clean, and
+    # quantising an anti-aliased transparent wordmark only dithers its edges.
+    for f in written:
         subprocess.run(["magick", "mogrify", "-colors", "256", "-define", "png:exclude-chunk=time",
                         "-define", "png:compression-level=9",
                         os.path.join(d, f)], check=False)
@@ -913,6 +982,11 @@ def for_display(level=None):
         print(f"    {target}: done")
     print(f"  {total} wallpapers at {W}x{H}"
           + (f"; {skipped} left alone (not this generator's)" if skipped else ""))
+
+    # unlock.png is deliberately NOT touched here. It is plymouth's logo, a
+    # fixed-size wordmark with no relationship to this panel -- an earlier
+    # version of this function refreshed it from the hero, which was correct
+    # only while unlock.png was wrongly a copy of the wallpaper.
     return 0
 
 

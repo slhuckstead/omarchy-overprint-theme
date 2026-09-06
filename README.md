@@ -70,20 +70,47 @@ not a resize, so the halftone scales with the frame instead of being stretched.
 ## The picker card
 
 Every first-party Omarchy theme ships a **screenshot of a working desktop** as
-its `preview.png` — bar, tiled terminals, file manager, borders, wallpaper
-behind. This repo ships a wallpaper, which answers a different question in the
-picker. To make a proper one:
+its `preview.png` — bar, tiled terminals, borders, wallpaper behind — and so
+does this one. A wallpaper in that slot answers a different question than the
+picker is asking. To rebuild it:
 
 ```
-optional/bin/overprint-make-preview                  # the current theme
-optional/bin/overprint-make-preview overprint-light  # a named one
+optional/bin/overprint-make-preview --workspace 4        # current theme
+optional/bin/overprint-make-preview overprint-light -w 4 # a named one
 ```
 
-It applies the theme, waits while you arrange a workspace, then captures and
-writes `preview.png` and `preview-unlock.png` at 2880x1800 — the size solitude
-and last-horizon use. It asks you to do the arranging because switching
-workspaces needs a real session; tooling that tries it gets no effect and
-captures whatever you had open instead.
+It applies the theme if needed, switches to the named workspace, waits while you
+arrange it, then captures at 2880x1800 — the size solitude and last-horizon use.
+
+**`--workspace` is a safety feature, not a convenience.** `grim` captures
+whatever the monitor is *displaying*, and nothing else in the pipeline knows
+what you intended. Without the assertion this will silently photograph whatever
+happens to be on screen — which, during this theme's own development, meant a
+capture aimed at one workspace shooting another and catching a terminal with a
+credential in it. So the check sits immediately before the shutter, refuses
+rather than writes, lists what it *would* have captured, and re-checks
+afterwards in case the workspace moved while the shutter was open. It also
+refuses an empty workspace. The pointer is hidden for the shot: Hyprland
+composites it into the surface, so `grim` catches it even unasked.
+
+## `unlock.png` is the boot logo, not a wallpaper
+
+Worth stating plainly because the name misleads and the failure is silent. Its
+only consumer is `omarchy-plymouth-set-by-theme`, which installs it verbatim as
+Plymouth's `logo.png`. Plymouth centres that **at native size** and then places
+everything else relative to it:
+
+```
+entry.y = logo.y + logo.height + 40      # omarchy.script:112
+```
+
+Ship a full-screen image there and the passphrase box, lock icon, password
+bullets and progress bar are all drawn off the bottom of the screen. On an
+encrypted disk you then type your passphrase blind — and it still works, which
+is why nobody notices. Earlier tags of this theme did exactly that. It now ships
+an 800x188 wordmark, the size every first-party theme uses, drawn in the
+contrast-solved palette rather than the raw inks so it survives the paper ground
+too.
 
 ## Publishing a fork
 

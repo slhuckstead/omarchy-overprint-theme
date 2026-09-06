@@ -26,7 +26,7 @@ series is a room-occupancy timeline and a sunrise/sunset pair to the minute is
 a coordinate. The journal gets the DECISION. Set OVERPRINT_DEBUG=1 for the
 numbers when you are actually debugging.
 """
-import os, sys, json, math, glob, time, fcntl, subprocess, datetime
+import os, sys, json, math, glob, time, fcntl, statistics, subprocess, datetime
 
 CFGDIR = os.path.expanduser("~/.config/overprint")
 CONF, HOLD = f"{CFGDIR}/backlight.conf", f"{CFGDIR}/hold"
@@ -57,6 +57,19 @@ DEFAULTS = dict(
     # timezone-derived and costs no network.
     DAY_GROUND_FLOOR="off",       # off | night | slate | day
     DAY_BRIGHT_MIN="",            # blank = off; percent floor while the sun is up
+    # --- smoothing. One camera sample per tick, acted on raw, tracks the
+    # SENSOR'S NOISE as screen brightness. Measured on 4.6h of real readings
+    # from a room that barely changed: 9 panel moves and 22.6% of total travel
+    # to follow a genuine span of 7.1%.
+    SMOOTH="3",                   # samples in the running median; 1 disables
+    DEADBAND_REL="6",             # deadband as a percent OF THE CURRENT PANEL
+    # Asymmetry is a COMFORT judgement, not a measured one. The median does all
+    # the noise rejection on its own -- 1 move and 3.1% travel at every DIM_STEP
+    # from 50 to 100 -- so this only trades dim-settle time for a gentler fall.
+    # 80 settles in 3 ticks; 100 is symmetric and settles in 2. The dataset that
+    # tuned this had no real transition in it, so it could not judge which feels
+    # better. A full day of samples containing an actual sunset can.
+    DIM_STEP="80",                # percent of the step taken when DIMMING
 )
 
 # Light to dark. "Never darker than the floor" is a comparison on this.
@@ -136,6 +149,25 @@ def bl_get():
         return None, None
 
 
+def smoothed(reading, c, st):
+    """Running median. The eye does not want the sensor's noise reproduced as
+    brightness, and a median rejects a single spurious sample outright rather
+    than averaging it in -- a headlight or someone crossing the lens moves the
+    mean and does not move the median.
+
+    The RAW reading is what gets recorded for calibration; only the control loop
+    sees this.
+    """
+    n = max(1, num(c, "SMOOTH", int))
+    hist = [x for x in st.get("light_hist", []) if isinstance(x, (int, float))]
+    if reading is not None:
+        hist.append(float(reading))
+    st["light_hist"] = hist[-n:]
+    if not st["light_hist"]:
+        return reading
+    return statistics.median(st["light_hist"])
+
+
 def bl_curve(reading, c):
     lo, hi = num(c, "BRIGHT_MIN"), num(c, "BRIGHT_MAX")
     knee = max(1.0, num(c, "BRIGHT_KNEE"))
@@ -174,9 +206,20 @@ def brightness(reading, c, st, sun_up=None):
         fl = num(c, "DAY_BRIGHT_MIN")
         if target < fl:
             target, floor_note = fl, " (daylight floor)"
-    if abs(target - cur_pct) < 2.0:
+    # Deadband RELATIVE to where the panel is. A flat 2% is 10% of the panel at
+    # 20% and 2% of it at 90%; the same absolute step is far more visible when
+    # the screen is dim.
+    band = max(2.0, cur_pct * num(c, "DEADBAND_REL") / 100.0)
+    if abs(target - cur_pct) < band:
         st["bl_set_pct"] = cur_pct
         return "already right"
+
+    # Asymmetric: go up in one step because you need to see, come down in
+    # fractions because a screen that dims decisively reads as a screen that is
+    # failing. The eye adapts to light quickly and to dark slowly; match it.
+    if target < cur_pct:
+        frac = max(1.0, min(100.0, num(c, "DIM_STEP"))) / 100.0
+        target = cur_pct + (target - cur_pct) * frac
     # ramp, so it reads as the room changing rather than the screen glitching
     steps, failed = 12, None
     for i in range(1, steps + 1):
@@ -510,11 +553,19 @@ def main():
         print("light: unavailable")
     else:
         print(f"light: {reading:.1f} via {lsrc}" if DEBUG else f"light: read via {lsrc}")
-    sample(reading, c)
+    sample(reading, c)          # RAW -- calibration wants the true distribution
 
-    bl = brightness(reading, c, st, sun_up=sun_up)
+    # Everything downstream sees the smoothed value. The ground has AGREE and
+    # DWELL on top of this; the backlight has only the deadband, so it is the
+    # half that was actually tracking noise.
+    lit = smoothed(reading, c, st)
+    if DEBUG and lit is not None and reading is not None and abs(lit - reading) > 0.05:
+        print(f"  debug: smoothed {reading:.1f} -> {lit:.1f} "
+              f"(median of {len(st.get('light_hist', []))})")
+
+    bl = brightness(lit, c, st, sun_up=sun_up)
     print("backlight:", bl)
-    g = ground(reading, c, st, force=force, sun_up=sun_up)
+    g = ground(lit, c, st, force=force, sun_up=sun_up)
     print("ground:", g)
 
     save(STATE, st)

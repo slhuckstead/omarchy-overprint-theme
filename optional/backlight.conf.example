@@ -15,6 +15,23 @@ BRIGHT_MAX=100
 BRIGHT_KNEE=140  # light reading at which brightness reaches BRIGHT_MAX
 MANUAL_HOLD=1800 # if you set brightness yourself, back off for this many seconds
 
+# One camera sample per tick, acted on raw, reproduces the SENSOR'S NOISE as
+# screen brightness. Measured over 4.6h of real readings from a room that barely
+# changed (27.1-37.4): the old path made 9 panel moves totalling 22.6% of travel
+# to follow a genuine span of 7.1%. With these it makes 1 move of 3.1%.
+#
+# A median rejects a single bad sample outright instead of averaging it in --
+# someone crossing the lens used to drop the panel to 15% for a tick; now it does
+# not move at all. Cost: a real change takes 2 ticks to register instead of 1.
+SMOOTH=3         # samples in the running median; 1 disables smoothing
+DEADBAND_REL=6   # deadband as a percent OF THE CURRENT PANEL, not a flat 2%
+                 # (a flat 2% is 10% of the panel at 20% and 2% of it at 90%)
+DIM_STEP=80      # percent of the step taken when DIMMING; 100 = symmetric.
+                 # The median does all the noise rejection by itself, so this
+                 # only trades dim-settle time for a gentler fall: 80 settles in
+                 # 3 ticks, 100 in 2. Which FEELS better is not something the
+                 # tuning data could answer -- it had no real transition in it.
+
 # --------------------------------------------------------------------- ground
 # day = paper, slate = a lifted dark for a lit room, night = the deep dark.
 # Three separate Omarchy themes; switching keeps the wallpaper's composition.

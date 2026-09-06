@@ -118,6 +118,25 @@ case "${1:-status}" in
       [[ $g == solar || $g == both || $g == agree ]] &&
         echo "        solar: LOCATE=$(get_key LOCATE off) (timezone is tried first either way)"
     fi
+    gf=$(get_key DAY_GROUND_FLOOR off); bf=$(get_key DAY_BRIGHT_MIN "")
+    if [[ $gf != off || -n $bf ]]; then
+      echo
+      echo "DAYLIGHT FLOOR  (the sensor mirrors the room; this stops it going dark"
+      echo "                on a gloomy afternoon while the sun is actually up)"
+      [[ $gf != off ]] && echo "        ground never darker than $gf$([[ $(get_key GROUND off) == off ]] && echo '  -- inert, GROUND=off')"
+      [[ -n $bf   ]] && echo "        panel never below ${bf}%"
+      up=$(python3 - <<'PY2' 2>/dev/null
+import importlib.machinery, importlib.util, os
+n="overprint-adapt"; p=os.path.expanduser(f"~/.local/bin/{n}")
+sp=importlib.util.spec_from_loader(n, importlib.machinery.SourceFileLoader(n,p))
+m=importlib.util.module_from_spec(sp); sp.loader.exec_module(m)
+up,_=m.sun_is_up(m.conf())
+print("yes" if up else ("no" if up is not None else "unknown"))
+PY2
+)
+      echo "        sun up right now: ${up:-unknown}  ->  $([[ $up == yes ]] && echo 'floor ACTIVE' || echo 'floor dormant')"
+    fi
+    echo
     echo -n "ground: "; "$BIN/overprint-ground"
     echo "theme:  $(omarchy theme current 2>/dev/null)"
     echo -n "light:  "; "$BIN/overprint-light" || echo "unavailable"

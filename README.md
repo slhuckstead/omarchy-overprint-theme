@@ -304,6 +304,26 @@ composition on the new ground, so the desktop changes weight without scrambling
 the picture. Left to itself `omarchy theme set` advances to the *next* wallpaper
 in the new theme, which is intolerable once something automatic is doing it.
 
+### The daylight floor
+
+The sensor **mirrors** the room, and in winter that is backwards. An overcast
+December afternoon with the lights off drives the panel to about 20% and the
+ground toward night — the dimmest thing available, on the day you would least
+want it.
+
+```
+DAY_GROUND_FLOOR=slate  # darkest ground allowed while the sun is up
+DAY_BRIGHT_MIN=40       # panel percent floor while the sun is up
+```
+
+After sunset the identical dark room dims normally: the floor is a statement
+about daylight, not about darkness. It ships with the ground floor set and the
+brightness floor blank, so it changes nothing until you ask.
+
+It is **not light therapy** and should not be described as one — a lightbox is
+~10,000 lux at the eye, a laptop panel roughly 100. It stops the machine working
+against you; it does not treat anything.
+
 `sensor` needs two thresholds and **there are none to ship**. A 0-255 average
 behind a locked exposure depends on the sensor, the lens, where the machine sits
 and which way the window faces. Nor can two button presses give them: that gets

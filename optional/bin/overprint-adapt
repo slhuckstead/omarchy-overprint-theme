@@ -51,7 +51,16 @@ DEFAULTS = dict(
     LOCATE="off",                 # off | ip   (timezone is always tried first)
     LAT="", LON="",
     GROUND_CALIBRATE="off",       # record readings for overprint-calibrate-ground
+    # --- daylight floor: the sensor MIRRORS the room, which is backwards on a
+    # gloomy winter afternoon. These clamp how dark it may take you while the
+    # sun is actually up. Off by default; both need a solar fix, which is
+    # timezone-derived and costs no network.
+    DAY_GROUND_FLOOR="off",       # off | night | slate | day
+    DAY_BRIGHT_MIN="",            # blank = off; percent floor while the sun is up
 )
+
+# Light to dark. "Never darker than the floor" is a comparison on this.
+GROUND_RANK = {"night": 0, "slate": 1, "day": 2}
 
 LEVELS = ("day", "slate", "night")
 
@@ -133,7 +142,13 @@ def bl_curve(reading, c):
     return lo + (hi - lo) * min(1.0, reading / knee) ** 0.8
 
 
-def brightness(reading, c, st):
+def daylight_wanted(c):
+    """Only consult the sun if a floor actually needs the answer."""
+    return (c["DAY_GROUND_FLOOR"].lower() in GROUND_RANK
+            or bool(c["DAY_BRIGHT_MIN"].strip()))
+
+
+def brightness(reading, c, st, sun_up=None):
     if c["BRIGHTNESS"].lower() != "on" or reading is None:
         return "off" if c["BRIGHTNESS"].lower() != "on" else "no reading"
     cur, mx = bl_get()
@@ -152,6 +167,13 @@ def brightness(reading, c, st):
         return f"manual hold, {left:.0f}m left"
 
     target = bl_curve(reading, c)
+    # The floor. A dark room in December is the room telling you it is gloomy,
+    # not that you want a dim screen.
+    floor_note = ""
+    if sun_up and c["DAY_BRIGHT_MIN"].strip():
+        fl = num(c, "DAY_BRIGHT_MIN")
+        if target < fl:
+            target, floor_note = fl, " (daylight floor)"
     if abs(target - cur_pct) < 2.0:
         st["bl_set_pct"] = cur_pct
         return "already right"
@@ -172,7 +194,8 @@ def brightness(reading, c, st):
     st["bl_set_pct"] = (now / mx_now * 100.0) if now is not None and mx_now else None
     if failed is not None:
         return f"{cur_pct:.0f}% -> {target:.0f}% FAILED (brightnessctl rc={failed})"
-    return (f"{cur_pct:.0f}% -> {target:.0f}%" if DEBUG else "adjusted")
+    return (f"{cur_pct:.0f}% -> {target:.0f}%{floor_note}" if DEBUG
+            else "adjusted" + floor_note)
 
 
 # ------------------------------------------------------------------ location
@@ -375,7 +398,24 @@ def current_ground():
         return None
 
 
-def ground(reading, c, st, force=False):
+def apply_ground_floor(target, cur, c, sun_up):
+    """Never darker than the floor while the sun is up.
+
+    Applied to the CANDIDATE, not just to a proposed change: if the sensor is
+    content to leave you on night at 3pm in December, that is exactly the case
+    the floor exists for, so it has to be able to lift a ground that nothing
+    else wanted to move.
+    """
+    fl = c["DAY_GROUND_FLOOR"].lower()
+    if not sun_up or fl not in GROUND_RANK:
+        return target, None
+    base = target or cur
+    if base not in GROUND_RANK or GROUND_RANK[base] >= GROUND_RANK[fl]:
+        return target, None
+    return fl, f"daylight floor, {base} -> {fl}"
+
+
+def ground(reading, c, st, force=False, sun_up=None):
     if c["GROUND"].lower() == "off":
         # Clear the tally too. A vote cast under a source that has since been
         # switched off should not be waiting to be counted when one is switched
@@ -388,6 +428,9 @@ def ground(reading, c, st, force=False):
         return "not on an Overprint ground; left alone"
 
     target, why = pick(reading, c, cur)
+    lifted, note = apply_ground_floor(target, cur, c, sun_up)
+    if note:
+        target, why = lifted, f"{note} ({why})"
     if target is None or target == cur:
         st["votes"] = []
         return f"{cur} stays ({why})"
@@ -454,6 +497,12 @@ def main():
     want = (c["BRIGHTNESS"].lower() == "on"
             or src in ("sensor", "both", "agree")
             or c["GROUND_CALIBRATE"].lower() == "on")
+    # The sun, only if a daylight floor needs it. Timezone-derived, no network,
+    # and the result never reaches the journal as a time or a coordinate.
+    sun_up = None
+    if daylight_wanted(c):
+        sun_up, _why = sun_is_up(c)
+
     reading, lsrc = light() if want else (None, None)
     if not want:
         print("light: not sampled (nothing asked for it)")
@@ -463,9 +512,9 @@ def main():
         print(f"light: {reading:.1f} via {lsrc}" if DEBUG else f"light: read via {lsrc}")
     sample(reading, c)
 
-    bl = brightness(reading, c, st)
+    bl = brightness(reading, c, st, sun_up=sun_up)
     print("backlight:", bl)
-    g = ground(reading, c, st, force=force)
+    g = ground(reading, c, st, force=force, sun_up=sun_up)
     print("ground:", g)
 
     save(STATE, st)

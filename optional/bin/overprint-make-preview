@@ -11,11 +11,29 @@
 # abstract image.
 #
 # WHY IT IS A SCRIPT AND NOT PART OF THE GENERATOR. Taking the screenshot needs
-# a clean workspace, and switching workspaces requires a real session: an agent
-# calling `hyprctl dispatch workspace N` gets no effect at all (verified against
-# both the legacy and the Omarchy 4 Lua form), so any capture it takes contains
-# whatever you had open. A human at the keyboard does in one keystroke what the
-# tooling cannot do at all, so this asks you to do that one part.
+# a clean workspace, and arranging one is a human job. Switching to one is not:
+# an earlier version of this comment claimed an agent could not switch workspaces
+# at all, "verified against both the legacy and the Omarchy 4 Lua form". That was
+# wrong, and believing it cost a session. Under Omarchy 4 the dispatchers live
+# under `hl.dsp` and the working forms are:
+#
+#     hyprctl dispatch 'hl.dsp.focus({ workspace = "4" })'
+#     hyprctl dispatch 'hl.dsp.focus({ window = "address:0x..." })'
+#     hyprctl dispatch 'hl.dsp.exec_cmd("ghostty -e btop")'
+#
+# The bare `hyprctl dispatch workspace 4` and `dispatch exec -- cmd` forms are
+# parsed as Lua and fail with a syntax error, which is what "no effect" looked
+# like. `hl.dsp.exec_cmd` spawns onto whatever workspace is ACTIVE at that
+# instant, so re-assert focus immediately before each spawn or the windows chase
+# the user.
+#
+# WHY --workspace EXISTS. grim captures whatever the monitor is DISPLAYING, and
+# this script had no idea what that was. With a human watching that is fine.
+# Driven by anything else it fails silently and the failure mode is publishing
+# your desktop -- which happened: a capture intended for workspace 4 shot
+# workspace 1, containing a session discussing a webhook URL that was itself a
+# credential. A stability check would not have caught it, because focus was
+# stably WRONG for the whole countdown. Only an explicit assertion does.
 #
 # USAGE
 #   overprint-make-preview [theme-name] [seconds]
@@ -34,10 +52,20 @@
 set -euo pipefail
 
 # overprint-make-preview [theme] [seconds]
-THEME=""; DELAY_ARG=""
+THEME=""; DELAY_ARG=""; WS=""
+_want_ws=0
 for a in "$@"; do
-  if [[ $a =~ ^[0-9]+$ ]]; then DELAY_ARG="$a"; elif [[ $a != --* ]]; then THEME="$a"; fi
+  if (( _want_ws )); then WS="$a"; _want_ws=0; continue; fi
+  case $a in
+    --allow-empty)   ALLOW_EMPTY=1 ;;
+    --workspace|-w)  _want_ws=1 ;;
+    --workspace=*)   WS="${a#*=}" ;;
+    *)
+      if [[ $a =~ ^[0-9]+$ ]]; then DELAY_ARG="$a"
+      elif [[ $a != --* ]]; then THEME="$a"; fi ;;
+  esac
 done
+[[ -z $WS || $WS =~ ^[0-9]+$ ]] || { echo "--workspace takes a number" >&2; exit 2; }
 THEMES="$HOME/.config/omarchy/themes"
 
 die() { printf 'overprint-make-preview: %s\n' "$1" >&2; exit 1; }
@@ -69,6 +97,17 @@ fi
 
 MON=$(hyprctl monitors -j | jq -r '.[]|select(.focused)|.name')
 SECS="${DELAY_ARG:-20}"
+
+# Switch there ourselves rather than trusting the caller to have done it. The
+# assertion below still runs -- this makes the common case right, the assertion
+# makes the wrong case harmless.
+if [[ -n $WS ]]; then
+  hyprctl dispatch "hl.dsp.focus({ workspace = \"$WS\" })" >/dev/null 2>&1
+  sleep 1
+  now=$(hyprctl activeworkspace -j | jq -r '.id')
+  [[ $now == "$WS" ]] || die "asked for workspace $WS but the monitor is on $now"
+  echo "  workspace $WS is live"
+fi
 
 # The terminal this runs in is usually one of the panes being photographed, so
 # it should show the THEME rather than this script's own chatter. A card whose
@@ -140,6 +179,45 @@ done
 printf "\r%-20s\r" ""
 sleep 0.6
 
+# THE GUARD. Check what the monitor is actually showing, at the last possible
+# moment, and refuse rather than capture the wrong thing. Writing nothing is
+# always recoverable; publishing the wrong desktop is not.
+if [[ -n $WS ]]; then
+  live=$(hyprctl activeworkspace -j | jq -r '.id')
+  if [[ $live != "$WS" ]]; then
+    echo >&2
+    echo "  REFUSING TO CAPTURE." >&2
+    echo "  Expected workspace $WS; the monitor is showing workspace $live." >&2
+    hyprctl clients -j | jq -r --arg w "$live" \
+      '.[] | select(.workspace.id == ($w|tonumber)) | "    would have captured: " + .class + "  " + .title' >&2
+    echo >&2
+    echo "  Nothing was written." >&2
+    exit 3
+  fi
+fi
+
+# An empty workspace is never a picker card. Switching to the right workspace
+# and finding nothing there is exactly as wrong as capturing the wrong one, and
+# it is the failure the assertion alone cannot see -- the first version of this
+# guard cheerfully shot a bare workspace 9 because that is what it was told to
+# assert. Bare desktops need --allow-empty and a deliberate choice.
+live=$(hyprctl activeworkspace -j | jq -r '.id')
+nwin=$(hyprctl clients -j | jq --arg w "$live" '[.[] | select(.workspace.id == ($w|tonumber))] | length')
+if (( nwin == 0 )) && [[ ${ALLOW_EMPTY:-0} != 1 ]]; then
+  echo >&2
+  echo "  REFUSING TO CAPTURE: workspace $live has no windows." >&2
+  echo "  A card of a bare desktop shows nothing the picker is asking about." >&2
+  echo "  Arrange a scene, or pass --allow-empty if that is really what you want." >&2
+  echo "  Nothing was written." >&2
+  exit 4
+fi
+
+# Always leave a record of what was in frame, whether or not --workspace was
+# given. A card you cannot audit after the fact is a card you cannot trust.
+echo "  capturing workspace $live ($nwin window(s)):"
+hyprctl clients -j | jq -r --arg w "$live" \
+  '.[] | select(.workspace.id == ($w|tonumber)) | "    " + .class + "  " + .title'
+
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 grim -o "$MON" "$TMP/shot.png" || die "grim failed"
 
@@ -150,9 +228,23 @@ magick "$TMP/shot.png" -resize 2880x1800^ -gravity center -extent 2880x1800 \
   "$TMP/preview.png"
 
 cp "$TMP/preview.png" "$DIR/preview.png"
+
 # preview-unlock.png is what omarchy-plymouth-list gates on: without it this
-# theme cannot style the boot or login screen at all.
-cp "$TMP/preview.png" "$DIR/preview-unlock.png"
+# theme cannot style the boot or login screen at all. It is NOT a second copy of
+# the desktop card, which is what this used to write. Every first-party theme
+# ships it at 1920x1080 showing the UNLOCK screen -- solitude, last-horizon and
+# lupine all differ from their own preview.png. So derive it from unlock.png,
+# which is the lock-screen image, and fall back to a wallpaper if a theme has
+# none.
+unlock_src="$DIR/unlock.png"
+[[ -f $unlock_src ]] || unlock_src=$(find -L "$DIR/backgrounds" -maxdepth 1 -name '*.png' 2>/dev/null | sort | head -1)
+if [[ -n $unlock_src && -f $unlock_src ]]; then
+  magick "$unlock_src" -resize 1920x1080^ -gravity center -extent 1920x1080 \
+    -colors 256 -define png:exclude-chunk=time -define png:compression-level=9 \
+    "$DIR/preview-unlock.png"
+else
+  echo "  warning: no unlock.png or wallpaper to build preview-unlock.png from" >&2
+fi
 
 echo
 echo "  wrote $DIR/preview.png"

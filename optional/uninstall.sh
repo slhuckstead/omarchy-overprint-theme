@@ -13,6 +13,7 @@ systemctl --user daemon-reload 2>/dev/null
 rm -f "$BIN"/overprint-{screensaver,screensaver-run,screensaver-plate,make-launcher-shadow} \
       "$BIN"/overprint-make-preview \
       "$BIN"/overprint-{light,adapt,appearance,notify-failure} \
+      "$BIN"/overprint-{ground,calibrate-ground} \
       "$BIN"/omarchy-launch-screensaver \
       "$HOOKS"/overprint-screensaver \
       "$UPDATE_HOOKS"/overprint-launcher-shadow.hook

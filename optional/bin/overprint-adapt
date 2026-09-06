@@ -1,23 +1,59 @@
 #!/usr/bin/env python3
-"""Adapt the backlight to the room.
+"""Adapt the screen to the room: the backlight continuously, the ground at the edges.
 
-Overprint is one theme now, so there is no day/slate/night level left to switch
-and this drives the backlight only. That retired the whole solar/geolocation
-half of this script: sunrise and sunset were only ever consulted to decide a
-theme level, so nothing here looks up a location, queries an IP geolocation
-service, or writes coordinates and solar times into the journal any more.
+One light reading per tick drives both, so the camera fires once, not twice --
+and only if something actually asked for it.
+
+GROUND ADAPTATION IS OFF BY DEFAULT and stays off until it is both switched on
+and calibrated. There are three grounds to move between now (day / slate /
+night, three separate Omarchy themes), which is what makes automatic switching
+worth having again; with one theme there was nothing to switch to.
+
+Two sources, independent:
+
+  sensor  the room, via overprint-light. Needs GROUND_DAY and GROUND_NIGHT,
+          which are camera- and room-specific and MUST be measured -- see
+          overprint-calibrate-ground. Shipped numbers would be meaningless.
+  solar   sun up / sun down, from coordinates that come from your timezone
+          unless you opt into more.
+
+GROUND=both lets the sensor lead and solar cover for it; GROUND=agree switches
+only when the two name the same ground.
+
+What is deliberately NOT logged: this runs every ten minutes forever, into a
+persistent journal readable by anything running as you, so a numeric light
+series is a room-occupancy timeline and a sunrise/sunset pair to the minute is
+a coordinate. The journal gets the DECISION. Set OVERPRINT_DEBUG=1 for the
+numbers when you are actually debugging.
 """
-import os, sys, json, time, subprocess
+import os, sys, json, math, glob, time, fcntl, subprocess, datetime
 
 CFGDIR = os.path.expanduser("~/.config/overprint")
 CONF, HOLD = f"{CFGDIR}/backlight.conf", f"{CFGDIR}/hold"
-STATE = f"{CFGDIR}/state.json"
-LIGHT_BIN = os.path.expanduser("~/.local/bin/overprint-light")
+STATE, LOCK = f"{CFGDIR}/state.json", f"{CFGDIR}/.lock"
+LOCS = f"{CFGDIR}/locations.json"
+STATEDIR = os.path.expanduser("~/.local/state/overprint")
+SAMPLES = f"{STATEDIR}/light-samples.tsv"
+BIN = os.path.expanduser("~/.local/bin")
+LIGHT_BIN, GROUND_BIN = f"{BIN}/overprint-light", f"{BIN}/overprint-ground"
 
-# APPEARANCE, AUTO_SOURCE, LIGHT_DAY/NIGHT, DARK_SPLIT/BAND, AGREE, DWELL,
-# LOCATE, LAT and LON all belonged to theme-level switching and are gone with it.
-DEFAULTS = dict(BRIGHTNESS="on", BRIGHT_MIN="10", BRIGHT_MAX="100",
-                BRIGHT_KNEE="140", MANUAL_HOLD="1800")
+DEBUG = os.environ.get("OVERPRINT_DEBUG") == "1"
+
+DEFAULTS = dict(
+    BRIGHTNESS="on", BRIGHT_MIN="10", BRIGHT_MAX="100", BRIGHT_KNEE="140",
+    MANUAL_HOLD="1800",
+    # --- ground adaptation: off, and inert until calibrated ---
+    GROUND="off",                 # off | sensor | solar | both | agree
+    GROUND_DAY="", GROUND_NIGHT="",   # blank == not calibrated
+    GROUND_BAND="6",              # hysteresis around both thresholds
+    GROUND_SOLAR_DAY="day", GROUND_SOLAR_NIGHT="night",
+    AGREE="2", DWELL="900",
+    LOCATE="off",                 # off | ip   (timezone is always tried first)
+    LAT="", LON="",
+    GROUND_CALIBRATE="off",       # record readings for overprint-calibrate-ground
+)
+
+LEVELS = ("day", "slate", "night")
 
 
 def conf():
@@ -31,6 +67,17 @@ def conf():
     except FileNotFoundError:
         pass
     return d
+
+
+def num(c, key, kind=float):
+    """A typo in the config used to raise and kill the whole run -- silently,
+    because a failing oneshot writes nothing a person sees, and it died AFTER
+    the camera had already fired. Fall back to the default and say so."""
+    try:
+        return kind(c[key])
+    except (ValueError, TypeError):
+        print(f"config: {key}={c[key]!r} is not a number; using {DEFAULTS[key]}")
+        return kind(DEFAULTS[key])
 
 
 def load(p, default):
@@ -55,6 +102,21 @@ def light():
         return None, None
 
 
+def sample(reading, c):
+    """Opt-in. This file IS the occupancy timeline the journal is kept clear of,
+    so it is off by default, mode 0600, and overprint-calibrate-ground tells you
+    to delete it once the thresholds are set."""
+    if c["GROUND_CALIBRATE"].lower() != "on" or reading is None:
+        return
+    try:
+        os.makedirs(STATEDIR, exist_ok=True)
+        fd = os.open(SAMPLES, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a") as f:
+            f.write(f"{int(time.time())}\t{reading:.1f}\n")
+    except OSError as e:
+        print(f"calibrate: could not record sample ({e.strerror})")
+
+
 # ---------------------------------------------------------------- brightness
 def bl_get():
     try:
@@ -66,14 +128,14 @@ def bl_get():
 
 
 def bl_curve(reading, c):
-    lo, hi = float(c["BRIGHT_MIN"]), float(c["BRIGHT_MAX"])
-    knee = max(1.0, float(c["BRIGHT_KNEE"]))
+    lo, hi = num(c, "BRIGHT_MIN"), num(c, "BRIGHT_MAX")
+    knee = max(1.0, num(c, "BRIGHT_KNEE"))
     return lo + (hi - lo) * min(1.0, reading / knee) ** 0.8
 
 
 def brightness(reading, c, st):
     if c["BRIGHTNESS"].lower() != "on" or reading is None:
-        return "brightness off" if c["BRIGHTNESS"].lower() != "on" else "no reading"
+        return "off" if c["BRIGHTNESS"].lower() != "on" else "no reading"
     cur, mx = bl_get()
     if cur is None: return "no backlight"
     cur_pct = cur / mx * 100.0
@@ -82,9 +144,9 @@ def brightness(reading, c, st):
     # moved it on purpose. Stand down for MANUAL_HOLD, then resume.
     last = st.get("bl_set_pct")
     if last is not None and abs(cur_pct - last) > 8:
-        st["manual_until"] = time.time() + int(c["MANUAL_HOLD"])
+        st["manual_until"] = time.time() + num(c, "MANUAL_HOLD", int)
         st["bl_set_pct"] = None
-        return f"manual change to {cur_pct:.0f}%, standing down"
+        return "manual change, standing down"
     if time.time() < st.get("manual_until", 0):
         left = (st["manual_until"] - time.time()) / 60
         return f"manual hold, {left:.0f}m left"
@@ -92,10 +154,9 @@ def brightness(reading, c, st):
     target = bl_curve(reading, c)
     if abs(target - cur_pct) < 2.0:
         st["bl_set_pct"] = cur_pct
-        return f"{cur_pct:.0f}% already right"
+        return "already right"
     # ramp, so it reads as the room changing rather than the screen glitching
-    steps = 12
-    failed = None
+    steps, failed = 12, None
     for i in range(1, steps + 1):
         pct = cur_pct + (target - cur_pct) * i / steps
         r = subprocess.run(["brightnessctl", "-q", "set", f"{pct:.0f}%"], timeout=6)
@@ -111,20 +172,281 @@ def brightness(reading, c, st):
     st["bl_set_pct"] = (now / mx_now * 100.0) if now is not None and mx_now else None
     if failed is not None:
         return f"{cur_pct:.0f}% -> {target:.0f}% FAILED (brightnessctl rc={failed})"
-    return f"{cur_pct:.0f}% -> {target:.0f}%"
+    return (f"{cur_pct:.0f}% -> {target:.0f}%" if DEBUG else "adjusted")
+
+
+# ------------------------------------------------------------------ location
+def timezone_coords():
+    """Tried FIRST, and on its own unless LOCATE says otherwise. It costs no
+    network contact at all, and the whole output of this path is one bit --
+    whether the sun is up. Handing a public IP to a commercial geo vendor for
+    that is a poor trade."""
+    try:    here = open("/etc/localtime", "rb").read()
+    except Exception: return None
+    for tab in ("/usr/share/zoneinfo/zone1970.tab", "/usr/share/zoneinfo/zone.tab"):
+        try:    rows = [l.split("\t") for l in open(tab) if not l.startswith("#")]
+        except Exception: continue
+        for row in rows:
+            if len(row) < 3: continue
+            zone = row[2].strip()
+            try:
+                if open(f"/usr/share/zoneinfo/{zone}", "rb").read() != here: continue
+            except Exception: continue
+            cc = row[1].strip()
+            try:
+                sign = 1 if cc[0] == "+" else -1
+                if len(cc) <= 12:
+                    lat, rest = sign*(int(cc[1:3]) + int(cc[3:5])/60), cc[5:]
+                else:
+                    lat, rest = sign*(int(cc[1:3]) + int(cc[3:5])/60 + int(cc[5:7])/3600), cc[7:]
+                s2 = 1 if rest[0] == "+" else -1
+                lon = (s2*(int(rest[1:4]) + int(rest[4:6])/60) if len(rest) <= 7
+                       else s2*(int(rest[1:4]) + int(rest[4:6])/60 + int(rest[6:8])/3600))
+                return round(lat, 2), round(lon, 2), "timezone"
+            except Exception: continue
+    return None
+
+
+def net_fingerprint():
+    try:
+        r = subprocess.run(["nmcli", "-t", "-f", "UUID", "connection", "show", "--active"],
+                           capture_output=True, text=True, timeout=6)
+        uuids = sorted(x for x in r.stdout.split() if x)
+    except Exception:
+        uuids = []
+    return "|".join(uuids) + "#" + os.path.realpath("/etc/localtime")
+
+
+def ip_lookup():
+    """One provider, not three. Three was a resilience story for a feature whose
+    entire output is a sunrise time; the fallback is the timezone, which always
+    works."""
+    try:
+        r = subprocess.run(["curl", "-fsS", "--max-time", "6", "https://ipwho.is/"],
+                           capture_output=True, text=True, timeout=10)
+        if r.returncode != 0: return None
+        d = json.loads(r.stdout)
+        return round(float(d["latitude"]), 2), round(float(d["longitude"]), 2)
+    except Exception:
+        return None
+
+
+def location(c):
+    if c["LAT"] and c["LON"]:
+        try:    return float(c["LAT"]), float(c["LON"]), "configured"
+        except ValueError: print("config: LAT/LON are not numbers; ignoring")
+    tz = timezone_coords()
+    if tz: return tz
+    if c["LOCATE"].lower() != "ip":
+        return None
+    fp = net_fingerprint()
+    cache = load(LOCS, {})
+    if fp in cache:
+        e = cache[fp]
+        return e["lat"], e["lon"], "cached"
+    got = ip_lookup()
+    if got:
+        cache[fp] = dict(lat=got[0], lon=got[1], at=int(time.time()))
+        if len(cache) > 40:
+            for k in sorted(cache, key=lambda k: cache[k]["at"])[:len(cache)-40]:
+                del cache[k]
+        save(LOCS, cache)
+        return got[0], got[1], "discovered"
+    return None
+
+
+def sun_is_up(c):
+    """-> (bool|None, reason). The reason NEVER carries coordinates or the
+    sunrise/sunset pair: two times to the minute fix a position to a few km,
+    and this goes into a persistent journal every ten minutes."""
+    loc = location(c)
+    if not loc: return None, "no location"
+    lat, lon, src = loc
+    now = datetime.datetime.now()
+    n = now.timetuple().tm_yday
+    g = 2*math.pi/365 * (n - 1 + 0.5)
+    eq = 229.18*(0.000075 + 0.001868*math.cos(g) - 0.032077*math.sin(g)
+                 - 0.014615*math.cos(2*g) - 0.040849*math.sin(2*g))
+    dec = (0.006918 - 0.399912*math.cos(g) + 0.070257*math.sin(g)
+           - 0.006758*math.cos(2*g) + 0.000907*math.sin(2*g)
+           - 0.002697*math.cos(3*g) + 0.00148*math.sin(3*g))
+    lr = math.radians(lat)
+    try:
+        cos_ha = (math.cos(math.radians(90.833))/(math.cos(lr)*math.cos(dec))
+                  - math.tan(lr)*math.tan(dec))
+    except ZeroDivisionError:
+        return None, "degenerate latitude"
+    if not -1 <= cos_ha <= 1:
+        # Polar day or night: cos_ha out of range means the sun does not cross
+        # the horizon today, and which side it is on is the answer.
+        return (cos_ha < -1), "polar"
+    ha = math.degrees(math.acos(cos_ha))
+    off = now.astimezone().utcoffset().total_seconds()/60.0
+    mid = datetime.datetime.combine(now.date(), datetime.time(0, 0))
+    r = mid + datetime.timedelta(minutes=720 - 4*(lon+ha) - eq + off)
+    s = mid + datetime.timedelta(minutes=720 - 4*(lon-ha) - eq + off)
+    if DEBUG:
+        print(f"  debug: {src} {r:%H:%M}-{s:%H:%M}")
+    return (r <= now < s), f"solar/{src}"
+
+
+# ---------------------------------------------------------------- ground pick
+def sensor_ground(reading, c, cur):
+    """Thresholds are pushed AWAY from the ground we are already on by
+    GROUND_BAND, so a reading sitting on a boundary does not oscillate. AGREE
+    and DWELL are the other two brakes."""
+    if not c["GROUND_DAY"] or not c["GROUND_NIGHT"]:
+        return None, "sensor not calibrated (run overprint-calibrate-ground)"
+    if reading is None:
+        return None, "no sensor reading"
+    day, night = num(c, "GROUND_DAY"), num(c, "GROUND_NIGHT")
+    if night >= day:
+        return None, "GROUND_NIGHT is not below GROUND_DAY"
+    band = num(c, "GROUND_BAND")
+    up = lambda t: t + (band if cur != "day" else 0)
+    dn = lambda t: t - (band if cur != "night" else 0)
+    if reading >= up(day):   return "day", "sensor"
+    if reading <= dn(night): return "night", "sensor"
+    # Leaving slate needs the band; arriving in it does not, or a room drifting
+    # out of one extreme would have nowhere to land.
+    return "slate", "sensor"
+
+
+def solar_ground(c):
+    up, why = sun_is_up(c)
+    if up is None: return None, why
+    key = "GROUND_SOLAR_DAY" if up else "GROUND_SOLAR_NIGHT"
+    lvl = c[key].lower()
+    if lvl not in LEVELS:
+        return None, f"{key}={c[key]!r} is not a ground"
+    return lvl, why
+
+
+def pick(reading, c, cur):
+    src = c["GROUND"].lower()
+    if src == "off":    return None, "off"
+    if src == "sensor": return sensor_ground(reading, c, cur)
+    if src == "solar":  return solar_ground(c)
+    if src == "both":
+        # The sensor leads: it measures the actual room, where solar only knows
+        # what the sky is doing. Solar covers a missing or uncalibrated sensor.
+        lvl, why = sensor_ground(reading, c, cur)
+        if lvl: return lvl, why
+        lvl2, why2 = solar_ground(c)
+        return lvl2, (f"{why2}, {why}" if lvl2 else f"{why}; {why2}")
+    if src == "agree":
+        a, wa = sensor_ground(reading, c, cur)
+        b, wb = solar_ground(c)
+        if a and b and a == b: return a, "sensor+solar agree"
+        if not a or not b:     return None, f"{wa}; {wb}"
+        return None, "sensor and solar disagree"
+    return None, f"GROUND={c['GROUND']!r} is not off/sensor/solar/both/agree"
+
+
+def current_ground():
+    try:
+        r = subprocess.run([GROUND_BIN], capture_output=True, text=True, timeout=15)
+        lvl = r.stdout.strip()
+        return lvl if lvl in LEVELS else None
+    except Exception:
+        return None
+
+
+def ground(reading, c, st, force=False):
+    if c["GROUND"].lower() == "off":
+        # Clear the tally too. A vote cast under a source that has since been
+        # switched off should not be waiting to be counted when one is switched
+        # back on.
+        st["votes"] = []
+        return "off"
+    cur = current_ground()
+    if cur is None:
+        st["votes"] = []
+        return "not on an Overprint ground; left alone"
+
+    target, why = pick(reading, c, cur)
+    if target is None or target == cur:
+        st["votes"] = []
+        return f"{cur} stays ({why})"
+
+    # An explicit instruction is not a noisy sensor sample: skip the agreement
+    # count and the dwell timer, which exist only to stop automatic drift.
+    votes = [v for v in st.get("votes", []) if v == target] + [target]
+    st["votes"] = votes[-8:]
+    need = 1 if force else max(1, num(c, "AGREE", int))
+    if len(votes) < need:
+        return f"want {target} ({why}), {len(votes)}/{need} agreeing"
+    since = time.time() - st.get("last_switch", 0)
+    dwell = num(c, "DWELL", int)
+    if not force and st.get("last_switch") and since < dwell:
+        return f"want {target} ({why}) but only {since/60:.0f}m since the last switch"
+
+    r = subprocess.run([GROUND_BIN, target], capture_output=True, text=True, timeout=180)
+    st["votes"] = []
+    if r.returncode != 0:
+        return f"{cur} -> {target} FAILED (overprint-ground rc={r.returncode}: " \
+               f"{r.stderr.strip().splitlines()[-1] if r.stderr.strip() else 'no output'})"
+    st["last_switch"] = time.time()
+    return f"{cur} -> {target} ({why}); {r.stdout.strip()}"
+
+
+def ensure_hypr_env():
+    """The timer runs outside the session. Switching a ground talks to Hyprland
+    and to omarchy-shell, neither of which is reachable without these."""
+    rt = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    os.environ.setdefault("XDG_RUNTIME_DIR", rt)
+    if "HYPRLAND_INSTANCE_SIGNATURE" not in os.environ:
+        s = sorted(glob.glob(f"{rt}/hypr/*/.socket.sock"), key=os.path.getmtime)
+        if s: os.environ["HYPRLAND_INSTANCE_SIGNATURE"] = os.path.basename(os.path.dirname(s[-1]))
+    if "WAYLAND_DISPLAY" not in os.environ:
+        for n in ("wayland-1", "wayland-0"):
+            if os.path.exists(f"{rt}/{n}"): os.environ["WAYLAND_DISPLAY"] = n; break
 
 
 def main():
+    force = "--now" in sys.argv[1:]
     if os.path.exists(HOLD):
         print("hold file present; doing nothing"); return 0
+
+    # overprint-appearance execs this, and that can land on top of the ten-minute
+    # tick. Two runs interleaving leaves the camera in manual exposure: run B
+    # snapshots the controls while A holds them, then restores the corruption
+    # after A has cleaned up. Skip rather than queue -- the next tick is 10
+    # minutes away and there is nothing to catch up on.
+    os.makedirs(CFGDIR, exist_ok=True)
+    lockf = open(LOCK, "w")
+    try:
+        fcntl.flock(lockf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("another run holds the lock; skipping"); return 0
+
+    ensure_hypr_env()
     c, st = conf(), load(STATE, {})
-    reading, src = light()
-    print(f"light: {reading if reading is not None else 'unavailable'}"
-          f"{' via ' + src if src else ''}")
+
+    # THE camera gate, and it is at the call site on purpose. The old version
+    # read the source setting inside the level-picking code -- i.e. after the
+    # shutter had already fired -- so every documented way to stop the camera
+    # was decorative. If nothing here wants a reading, nothing opens the lens.
+    src = c["GROUND"].lower()
+    want = (c["BRIGHTNESS"].lower() == "on"
+            or src in ("sensor", "both", "agree")
+            or c["GROUND_CALIBRATE"].lower() == "on")
+    reading, lsrc = light() if want else (None, None)
+    if not want:
+        print("light: not sampled (nothing asked for it)")
+    elif reading is None:
+        print("light: unavailable")
+    else:
+        print(f"light: {reading:.1f} via {lsrc}" if DEBUG else f"light: read via {lsrc}")
+    sample(reading, c)
+
     bl = brightness(reading, c, st)
     print("backlight:", bl)
+    g = ground(reading, c, st, force=force)
+    print("ground:", g)
+
     save(STATE, st)
-    return 1 if "FAILED" in bl else 0
+    return 1 if ("FAILED" in bl or "FAILED" in g) else 0
 
 
 if __name__ == "__main__":

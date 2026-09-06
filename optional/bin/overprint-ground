@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+"""Switch Overprint between its three grounds, keeping the composition.
+
+    overprint-ground                 print the current ground
+    overprint-ground day|slate|night switch to that ground
+    overprint-ground --list          the grounds and their theme slugs
+
+Omarchy has no notion of "the same theme in another weight": the three grounds
+are three separate themes (Catppuccin / Catppuccin Latte), and `omarchy theme
+set` ADVANCES the background -- `choose_theme_background` finds the current
+wallpaper in the new theme's list and takes the NEXT one. So switching ground
+the obvious way scrambles the wallpaper every time, which is intolerable once
+something automatic is doing the switching.
+
+The wallpapers are named `<press>-<level>-<composition>.png` and the composition
+names line up across all three grounds, so "keep the composition, change the
+ground" is a rename away. This sets OMARCHY_THEME_SKIP_BACKGROUND=1 (the only
+hook omarchy-theme-set offers for leaving the background alone) and then places
+the matching wallpaper itself.
+"""
+import os, sys, glob, subprocess
+
+STATE = os.path.expanduser("~/.local/state/omarchy")
+THEMES = os.path.expanduser("~/.config/omarchy/themes")
+USER_BG = os.path.expanduser("~/.config/omarchy/backgrounds")
+
+# night is the canon and owns the bare name; the other two are suffixed. This
+# has to agree with VARIANT_SUFFIX in the generator.
+SLUG = {"night": "overprint", "slate": "overprint-slate", "day": "overprint-light"}
+LEVELS = tuple(SLUG)
+ALIAS = {"light": "day", "paper": "day", "dark": "night"}
+
+
+def current_slug():
+    try:
+        return open(f"{STATE}/current/theme.name").read().strip()
+    except OSError:
+        return ""
+
+
+def current_level():
+    slug = current_slug()
+    for lvl, s in SLUG.items():
+        if slug == s:
+            return lvl
+    return None
+
+
+def current_background():
+    try:
+        return os.readlink(f"{STATE}/current/background")
+    except OSError:
+        return None
+
+
+def parse(path):
+    """`harbour-slate-11-register-alt.png` -> (press, level, composition).
+
+    Split twice only: composition names carry dashes of their own
+    (`3-canon-deep`, `11-register-alt`) and joining on them loses the name.
+    """
+    if not path:
+        return None
+    stem = os.path.basename(path)
+    if not stem.endswith(".png"):
+        return None
+    parts = stem[:-4].split("-", 2)
+    if len(parts) != 3 or parts[1] not in LEVELS:
+        return None
+    return tuple(parts)
+
+
+def wallpapers(level):
+    """Both directories. The SHIP twelve live in the theme dir and the rest in
+    the user dir, because `omarchy theme install` does rm -rf on the first."""
+    slug = SLUG[level]
+    out = []
+    for d in (f"{THEMES}/{slug}/backgrounds", f"{USER_BG}/{slug}"):
+        out += sorted(glob.glob(f"{d}/*.png"))
+    return out
+
+
+def match(level, press, comp):
+    """Same press and composition first; failing that, the same composition on
+    any press. A ground that simply does not carry the composition returns None
+    and the caller lets Omarchy pick."""
+    want = f"{press}-{level}-{comp}.png"
+    cands = wallpapers(level)
+    for p in cands:
+        if os.path.basename(p) == want:
+            return p, "exact"
+    tail = f"-{level}-{comp}.png"
+    for p in cands:
+        if os.path.basename(p).endswith(tail):
+            return p, "same composition, another press"
+    return None, "no match"
+
+
+def switch(level):
+    cur = current_level()
+    if cur is None:
+        print(f"current theme {current_slug()!r} is not an Overprint ground; "
+              f"left alone", file=sys.stderr)
+        return 2
+    slug = SLUG[level]
+    if not os.path.isdir(f"{THEMES}/{slug}"):
+        print(f"theme {slug} is not installed", file=sys.stderr)
+        return 1
+    if cur == level:
+        print(f"already on {level}")
+        return 0
+
+    got = parse(current_background())
+    target, why = (None, "no current wallpaper") if not got else match(level, got[0], got[2])
+
+    env = dict(os.environ, OMARCHY_THEME_SKIP_BACKGROUND="1" if target else "0")
+    r = subprocess.run(["omarchy", "theme", "set", slug], env=env, timeout=180)
+    if r.returncode != 0:
+        print(f"omarchy theme set {slug} failed (rc={r.returncode})", file=sys.stderr)
+        return 1
+
+    if target:
+        b = subprocess.run(["omarchy-theme-bg-set", target], timeout=60)
+        if b.returncode != 0:
+            # The palette already moved, so say so rather than reporting failure
+            # for the whole switch -- and leave the ground where it now is.
+            print(f"{cur} -> {level}, but the wallpaper could not be set "
+                  f"(rc={b.returncode})", file=sys.stderr)
+            return 1
+        print(f"{cur} -> {level}, kept {os.path.basename(target)[:-4]} ({why})")
+    else:
+        print(f"{cur} -> {level}, wallpaper chosen by Omarchy ({why})")
+    return 0
+
+
+def main(argv):
+    if not argv or argv[0] in ("status", "--status"):
+        lvl = current_level()
+        print(lvl if lvl else f"not an Overprint ground ({current_slug()!r})")
+        return 0 if lvl else 1
+    a = argv[0]
+    if a in ("-h", "--help"):
+        print(__doc__.strip()); return 0
+    if a in ("--list", "list"):
+        cur = current_level()
+        for lvl in LEVELS:
+            have = "installed" if os.path.isdir(f"{THEMES}/{SLUG[lvl]}") else "MISSING"
+            print(f"  {'*' if lvl == cur else ' '} {lvl:<6} {SLUG[lvl]:<18} {have}"
+                  f"  {len(wallpapers(lvl))} wallpapers")
+        return 0
+    lvl = ALIAS.get(a, a)
+    if lvl not in LEVELS:
+        print(f"usage: overprint-ground [day|slate|night|--list]", file=sys.stderr)
+        return 2
+    return switch(lvl)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

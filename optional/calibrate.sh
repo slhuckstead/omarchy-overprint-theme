@@ -25,3 +25,8 @@ echo "BRIGHT_KNEE=$knee written to $CONF"
 echo "That is the reading at which the backlight reaches BRIGHT_MAX."
 echo "If the screen ends up too dim in a bright room, lower it; too bright in a"
 echo "dark one, raise BRIGHT_MIN. Apply with: overprint-appearance status"
+echo
+echo "This sets the BACKLIGHT only. The GROUND thresholds -- which reading means"
+echo "a day room and which a night one -- cannot be got from two button presses:"
+echo "they are the boundaries between three grounds, not the extremes. Measure them"
+echo "over a real day with:  overprint-calibrate-ground --start"

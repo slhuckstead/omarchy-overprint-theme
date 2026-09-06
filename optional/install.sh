@@ -109,16 +109,25 @@ fi
 if [[ $WANT_BACKLIGHT == ask ]]; then
   cat <<'EXPLAIN'
 
-BACKLIGHT ADAPTER
-  Ramps your backlight to match room light, sampled every 10 minutes.
+BACKLIGHT AND GROUND ADAPTER
+  Ramps your backlight to match room light, sampled every 10 minutes. It can
+  also switch the GROUND -- day (paper) / slate / night -- as the room or the
+  day changes, keeping the composition of the wallpaper you are on.
 
-  This machine has no ambient light sensor, so it uses the WEBCAM with exposure
-  locked. The camera LED will blink on each sample. It never writes an image
+  GROUND SWITCHING IS INSTALLED OFF and stays off until you turn it on. It has
+  two sources you choose between: the room, via the camera, or the sun, which
+  needs no camera at all. See `overprint-appearance ground`.
+
+  If the machine has no ambient light sensor it uses the WEBCAM with exposure
+  locked, and the LED will blink on each sample. It never writes an image
   anywhere -- only a single average brightness number -- but if a camera waking
-  every ten minutes is not something you want, answer no.
+  every ten minutes is not something you want, answer no. (Backlight off plus
+  the solar ground source never opens the camera at all.)
 
-  The thresholds ship calibrated for the author's panel and camera. Run
-  ./calibrate.sh afterwards to set them for yours.
+  No light thresholds are shipped, because a 0-255 reading through a locked
+  exposure means nothing on another camera. Measure yours:
+    ./calibrate.sh                      the backlight knee, two button presses
+    overprint-calibrate-ground --start   the ground thresholds, over a real day
 
 EXPLAIN
   ask "Install the backlight adapter?" && WANT_BACKLIGHT=yes || WANT_BACKLIGHT=no
@@ -129,6 +138,7 @@ if [[ $WANT_BACKLIGHT == yes ]]; then
   need v4l2-ctl || echo "  note: v4l2-ctl (v4l-utils) missing; the camera path will not work"
   mkdir -p "$BIN" "$UNITS" "$HOME/.config/overprint"
   install -m755 "$HERE"/bin/overprint-light "$HERE"/bin/overprint-adapt \
+                "$HERE"/bin/overprint-ground "$HERE"/bin/overprint-calibrate-ground \
                 "$HERE"/bin/overprint-appearance "$HERE"/bin/overprint-notify-failure "$BIN"/
   install -m644 "$HERE"/systemd/overprint-backlight.timer \
                 "$HERE"/systemd/overprint-backlight.service \

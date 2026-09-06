@@ -1,23 +1,74 @@
 # ---------------------------------------------------------------- Overprint
-# Backlight adaptation. Overprint is ONE theme now, so there is no day/slate/
-# night level to switch between and nothing here changes the theme.
+# Adaptation: the backlight continuously, the GROUND at the edges of the day.
 #
-# Everything that used to live in this file -- APPEARANCE, AUTO_SOURCE,
-# LIGHT_DAY/LIGHT_NIGHT, DARK_SPLIT, DARK_BAND, AGREE, DWELL, LOCATE, LAT, LON --
-# belonged to theme-level switching and is gone with it. Nothing looks up a
-# location or queries a geolocation service any more.
+# The file is still called backlight.conf for the sake of the installers that
+# reference it. It now configures both halves.
 #
-# Control it with: overprint-appearance [on|off|hold|resume|status]
+#   overprint-appearance                 what is set and what it is doing
+#   overprint-appearance ground sensor   pick which source drives the ground
+#   overprint-calibrate-ground --start   measure the thresholds sensor needs
 
+# ------------------------------------------------------------------ backlight
 BRIGHTNESS=on    # off disables backlight adaptation entirely
 BRIGHT_MIN=10    # percent floor, so the panel never goes black
 BRIGHT_MAX=100
 BRIGHT_KNEE=140  # light reading at which brightness reaches BRIGHT_MAX
 MANUAL_HOLD=1800 # if you set brightness yourself, back off for this many seconds
 
+# --------------------------------------------------------------------- ground
+# day = paper, slate = a lifted dark for a lit room, night = the deep dark.
+# Three separate Omarchy themes; switching keeps the wallpaper's composition.
+#
+#   off      nothing switches the ground.                        <- the default
+#   sensor   the room decides, from the camera. Needs the two thresholds below.
+#   solar    the sun decides. Never opens the camera.
+#   both     sensor leads; solar covers when the sensor cannot answer.
+#   agree    switch only when sensor and solar name the same ground.
+GROUND=off
+
+# What a "day room" and a "night room" READ on this camera. There is no sensible
+# default: the reading is a 0-255 average behind a locked exposure, so it depends
+# on the sensor, the lens, where the machine sits and which way the window faces.
+# Blank means uncalibrated, and an uncalibrated sensor decides nothing.
+#   overprint-calibrate-ground --start   then use the machine for a day
+GROUND_DAY=
+GROUND_NIGHT=
+GROUND_BAND=6    # hysteresis: how far past a threshold before it counts
+
+# Which ground the sun's two states map to. night+day here means slate is only
+# ever reached by the sensor; set GROUND_SOLAR_NIGHT=slate if you would rather
+# never see the deep dark from solar alone.
+GROUND_SOLAR_DAY=day
+GROUND_SOLAR_NIGHT=night
+
+AGREE=2          # consecutive ticks that must want the same ground (10 min each)
+DWELL=900        # seconds to sit still after a switch, whatever the readings say
+
+# Where solar gets coordinates. /etc/localtime is always tried FIRST and costs
+# no network contact; the whole output of the solar path is one bit -- whether
+# the sun is up -- and handing a public IP to a geo vendor for that is a poor
+# trade. LOCATE=ip permits one lookup as a fallback if the timezone yields
+# nothing. Set LAT/LON yourself and neither is consulted.
+LOCATE=off
+LAT=
+LON=
+
+# Record one reading per tick so overprint-calibrate-ground can propose the two
+# thresholds. Written 0600 to ~/.local/state/overprint/light-samples.tsv. That
+# file is a log of when you were at this machine, which is exactly what the
+# journal is kept clear of, so: opt-in, and delete it when you are done.
+# ON also keeps the camera sampling even with BRIGHTNESS=off.
+GROUND_CALIBRATE=off
+
+# ------------------------------------------------------------------- the lens
 # The webcam is sampled once per timer tick (every 10 min) and its LED blinks.
-# BRIGHTNESS=off does NOT stop that on its own -- the reading is taken before
-# the setting is consulted. To stop the camera entirely:
+# It is sampled if ANY of these is true: BRIGHTNESS=on, GROUND is sensor/both/
+# agree, or GROUND_CALIBRATE=on. If none is, the camera is never opened -- the
+# check is at the call site, not somewhere downstream of it.
+# To stop the timer outright:
 #     systemctl --user disable --now overprint-backlight.timer
 #
 # touch ~/.config/overprint/hold   to suspend adaptation without disabling it
+#
+# The journal gets decisions, not measurements: no light readings, no
+# coordinates, no sunrise/sunset times. OVERPRINT_DEBUG=1 for the numbers.

@@ -1,0 +1,259 @@
+#!/usr/bin/env python3
+"""Find the light readings that mean "day room" and "night room" on YOUR camera.
+
+    overprint-calibrate-ground --start   begin recording (one sample per tick)
+    overprint-calibrate-ground           report on what has been recorded
+    overprint-calibrate-ground --apply   write the proposed thresholds
+    overprint-calibrate-ground --stop    stop recording
+    overprint-calibrate-ground --forget  delete the recording
+
+There are no shipped numbers to fall back on and there should not be. The
+webcam reports a 0-255 average through a LOCKED exposure, so what a reading
+means depends on the sensor, the lens, where the laptop sits and which way the
+window faces. A number measured on one machine is noise on another.
+
+Nor can you get it from two button presses in a bright room and a dark one:
+that gives the extremes, and the thresholds you need are the two BOUNDARIES
+between three grounds. Those live in the middle of the distribution, and where
+they fall depends on how the day is actually spent. So this records what the
+adapter is already measuring and proposes the splits afterwards.
+
+Run --start, use the machine for a full day including after dark, then come
+back. It needs a day's span before it will propose anything.
+
+The recording is an occupancy timeline -- what time the room lit up, what time
+you stopped -- which is precisely what the journal is kept clear of. It is
+0600, opt-in, and --apply offers to delete it.
+"""
+import os, sys, time, subprocess, datetime
+
+CFGDIR = os.path.expanduser("~/.config/overprint")
+CONF = f"{CFGDIR}/backlight.conf"
+SAMPLES = os.path.expanduser("~/.local/state/overprint/light-samples.tsv")
+
+MIN_SAMPLES = 40
+MIN_SPAN_H = 18.0        # a full day, so both ends of it are represented
+
+
+def read_conf():
+    d = {}
+    try:
+        for line in open(CONF):
+            line = line.split("#", 1)[0].strip()
+            if "=" in line:
+                k, v = line.split("=", 1)
+                d[k.strip()] = v.strip()
+    except FileNotFoundError:
+        pass
+    return d
+
+
+def set_key(k, v):
+    os.makedirs(CFGDIR, exist_ok=True)
+    lines, seen = [], False
+    try:    lines = open(CONF).read().splitlines()
+    except FileNotFoundError: pass
+    for i, line in enumerate(lines):
+        head = line.split("#", 1)[0]
+        if "=" in head and head.split("=", 1)[0].strip() == k:
+            lines[i], seen = f"{k}={v}", True
+    if not seen:
+        lines.append(f"{k}={v}")
+    with open(CONF, "w") as f:
+        f.write("\n".join(lines) + "\n")
+
+
+def samples():
+    out = []
+    try:
+        for line in open(SAMPLES):
+            try:
+                t, v = line.split()
+                out.append((int(t), float(v)))
+            except ValueError:
+                continue
+    except FileNotFoundError:
+        return []
+    return sorted(out)
+
+
+def kmeans3(vals):
+    """Three clusters in one dimension -- night room, lit room, daylight -- by
+    Lloyd's algorithm from spread-out seeds. Returns (centres, groups) sorted by
+    centre, or None if three clusters cannot be formed at all."""
+    lo, hi = min(vals), max(vals)
+    if hi - lo < 1e-6:
+        return None
+    cs = [lo, (lo + hi) / 2, hi]
+    groups = None
+    for _ in range(60):
+        groups = [[], [], []]
+        for v in vals:
+            groups[min(range(3), key=lambda i: abs(v - cs[i]))].append(v)
+        if any(not g for g in groups):
+            return None
+        pairs = sorted((sum(g) / len(g), g) for g in groups)
+        new = [c for c, _ in pairs]
+        groups = [g for _, g in pairs]
+        if all(abs(a - b) < 1e-9 for a, b in zip(cs, new)):
+            cs = new
+            break
+        cs = new
+    return cs, groups
+
+
+def pooled_sd(groups):
+    """Spread WITHIN the clusters -- the scale of the noise the thresholds have
+    to survive."""
+    n = sum(len(g) for g in groups)
+    if n <= len(groups):
+        return 0.0
+    ss = 0.0
+    for g in groups:
+        m = sum(g) / len(g)
+        ss += sum((v - m) ** 2 for v in g)
+    return (ss / (n - len(groups))) ** 0.5
+
+
+def profile(rows):
+    """Median reading per hour of day. The shape is the point: if it is flat,
+    the room never changes and no threshold will help."""
+    buckets = {}
+    for t, v in rows:
+        buckets.setdefault(datetime.datetime.fromtimestamp(t).hour, []).append(v)
+    hi = max((sorted(v)[len(v)//2] for v in buckets.values()), default=1.0) or 1.0
+    print("  hour  median  (bar scaled to the busiest hour)")
+    for h in range(24):
+        v = buckets.get(h)
+        if not v:
+            print(f"  {h:02d}:00      -")
+            continue
+        med = sorted(v)[len(v) // 2]
+        print(f"  {h:02d}:00  {med:6.1f}  {'#' * int(round(med / hi * 40))}"
+              f"  ({len(v)} sample{'s' if len(v) != 1 else ''})")
+
+
+def propose(vals, band):
+    """k-means will ALWAYS find three clusters if you ask it for three. On a
+    room whose light never really changes it splits the noise, and the
+    thresholds that come out are a hair apart -- which would flap the ground on
+    sensor jitter every ten minutes. So the split has to earn it twice:
+
+      - farther apart than the noise inside the clusters (3 pooled SDs), and
+      - farther apart than the hysteresis band can absorb (2 x GROUND_BAND),
+        or the middle ground is unreachable and one boundary swallows the other.
+    """
+    got = kmeans3(vals)
+    if not got:
+        return None, "the readings do not form three groups at all"
+    cs, groups = got
+    sd = pooled_sd(groups)
+    need = max(2.0 * band, 3.0 * sd)
+    gaps = (cs[1] - cs[0], cs[2] - cs[1])
+    if min(gaps) < need:
+        return None, (f"the three groups it found are centred at "
+                      f"{cs[0]:.1f} / {cs[1]:.1f} / {cs[2]:.1f} -- gaps of "
+                      f"{gaps[0]:.1f} and {gaps[1]:.1f}, against noise of "
+                      f"{sd:.1f} and a hysteresis band of {band:.0f}. It needs "
+                      f"{need:.1f} to mean anything")
+    # The boundary between two clusters sits midway between their centres.
+    return (round((cs[0] + cs[1]) / 2, 1), round((cs[1] + cs[2]) / 2, 1), cs), ""
+
+
+def report(apply=False):
+    rows = samples()
+    c = read_conf()
+    on = c.get("GROUND_CALIBRATE", "off").lower() == "on"
+    if not rows:
+        print(f"No samples recorded yet. Recording is {'ON' if on else 'OFF'}.")
+        if not on:
+            print("Start with: overprint-calibrate-ground --start")
+        return 1
+
+    vals = [v for _, v in rows]
+    span = (rows[-1][0] - rows[0][0]) / 3600.0
+    print(f"{len(rows)} samples over {span:.1f} hours, "
+          f"recording is {'ON' if on else 'OFF'}")
+    print(f"range {min(vals):.1f} - {max(vals):.1f}\n")
+    profile(rows)
+    print()
+
+    if len(rows) < MIN_SAMPLES or span < MIN_SPAN_H:
+        print(f"Not enough yet: {len(rows)}/{MIN_SAMPLES} samples, "
+              f"{span:.1f}/{MIN_SPAN_H:.0f} hours.")
+        print("Keep going -- it needs the dark end of the day as well as the lit one.")
+        return 1
+
+    try:
+        band = float(c.get("GROUND_BAND", "6") or 6)
+    except ValueError:
+        band = 6.0
+    got, why = propose(vals, band)
+    if not got:
+        print(f"No usable split: {why}.")
+        print("\nEither the room genuinely holds one light level, or the camera is\n"
+              "not seeing the change. The sensor cannot drive the ground here.\n"
+              "Leave GROUND=off, or use GROUND=solar, which needs no sensor at all.")
+        return 1
+    night, day, cs = got
+    print(f"Three light levels found, centred at "
+          f"{cs[0]:.1f} / {cs[1]:.1f} / {cs[2]:.1f}:")
+    print(f"    GROUND_NIGHT={night}   at or below this -> the night ground")
+    print(f"    GROUND_DAY={day}   at or above this -> the day (paper) ground")
+    print(f"    between the two   -> slate")
+
+    if not apply:
+        print("\nWrite them with: overprint-calibrate-ground --apply")
+        return 0
+
+    set_key("GROUND_NIGHT", night)
+    set_key("GROUND_DAY", day)
+    print(f"\nWritten to {CONF}.")
+    # Read it back rather than asserting. Telling someone adaptation is off when
+    # it is on is the same class of lie as a kill-switch that does not switch.
+    now = read_conf().get("GROUND", "off").lower()
+    if now in ("off", ""):
+        print("Ground adaptation is still OFF. Turn it on when you want it:")
+        print("    overprint-appearance ground sensor      (the room decides)")
+        print("    overprint-appearance ground solar       (the sun decides; no camera)")
+        print("    overprint-appearance ground both        (sensor leads, solar covers)")
+    elif now == "solar":
+        print(f"GROUND={now}, which does not consult the sensor. These thresholds")
+        print("take effect if you switch to sensor, both or agree.")
+    else:
+        print(f"GROUND={now} is already on, so these thresholds are live from the")
+        print("next tick (every 10 minutes).")
+    print("\nThe recording is no longer needed and is a log of when you were at")
+    print("this machine. Delete it with: overprint-calibrate-ground --forget")
+    return 0
+
+
+def main(argv):
+    a = argv[0] if argv else ""
+    if a in ("-h", "--help"):
+        print(__doc__.strip()); return 0
+    if a == "--start":
+        set_key("GROUND_CALIBRATE", "on")
+        print("Recording one light reading per adapter tick (every 10 minutes).")
+        print("This keeps the webcam sampling even if BRIGHTNESS=off.")
+        print("Use the machine normally for a full day, then run this again.")
+        return 0
+    if a == "--stop":
+        set_key("GROUND_CALIBRATE", "off")
+        print("Recording stopped. The samples so far are kept.")
+        return 0
+    if a == "--forget":
+        try:
+            os.remove(SAMPLES); print(f"Deleted {SAMPLES}")
+        except FileNotFoundError:
+            print("Nothing recorded.")
+        return 0
+    if a in ("", "--apply", "--report"):
+        return report(apply=(a == "--apply"))
+    print("usage: overprint-calibrate-ground "
+          "[--start|--stop|--apply|--forget]", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

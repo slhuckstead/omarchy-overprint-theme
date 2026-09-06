@@ -1,19 +1,27 @@
 #!/usr/bin/env bash
-# Control Overprint's backlight adaptation.
+# Control Overprint's adaptation.
 #
-#   overprint-appearance              show current setting and state
-#   overprint-appearance on | off     backlight adaptation on or off
-#   overprint-appearance hold         suspend adaptation entirely
-#   overprint-appearance resume       resume it
+#   overprint-appearance                    what is set and what it is doing
+#   overprint-appearance on | off           backlight adaptation on or off
+#   overprint-appearance hold | resume      suspend everything, or resume it
 #
-# `light`, `dark` and `auto` are gone: Overprint is one theme now, so there is
-# no day/slate/night level left to aim at. Pick a wallpaper instead --
-# `omarchy theme background` cycles the 72 in this theme.
+#   overprint-appearance day|slate|night    switch ground NOW, by hand
+#   overprint-appearance ground             which source drives the ground
+#   overprint-appearance ground off|sensor|solar|both|agree
+#
+# The ground is the paper the press prints on: day is paper, slate is a lifted
+# dark for a lit room, night is the deep dark. They are three separate Omarchy
+# themes, so switching ground switches theme -- but keeps the composition of
+# the wallpaper you are on. That is overprint-ground, which this wraps.
+#
+# `sensor` needs thresholds measured on your own camera; there are none to ship.
+# Run overprint-calibrate-ground first, or it stays inert and says so.
 set -uo pipefail
 CFGDIR="$HOME/.config/overprint"
 CONF="$CFGDIR/backlight.conf"
 HOLD="$CFGDIR/hold"
 STATE="$CFGDIR/state.json"
+BIN="$HOME/.local/bin"
 
 # Write a key whether or not it is already present. The old version used a bare
 # `sed s/^KEY=.*/` and reported success even when the key was absent and nothing
@@ -30,19 +38,79 @@ set_key() {
   grep -qE "^$k=$v$" "$CONF" || { echo "failed to set $k" >&2; return 1; }
 }
 
+get_key() {  # get_key <key> <default>
+  local v
+  v=$(grep -E "^[[:space:]]*$1[[:space:]]*=" "$CONF" 2>/dev/null | tail -1 |
+      sed -E "s|^[[:space:]]*$1[[:space:]]*=||" | sed 's/#.*//' | xargs) || true
+  [[ -n ${v:-} ]] && echo "$v" || echo "$2"
+}
+
 case "${1:-status}" in
   on|off)
     set_key BRIGHTNESS "$1" || exit 1
     echo "BRIGHTNESS=$1"
-    exec "$HOME/.local/bin/overprint-adapt"
+    exec "$BIN/overprint-adapt"
     ;;
   hold)   touch "$HOLD"; echo "adaptation suspended" ;;
-  resume) rm -f "$HOLD"; echo "adaptation resumed"; exec "$HOME/.local/bin/overprint-adapt" ;;
+  resume) rm -f "$HOLD"; echo "adaptation resumed"; exec "$BIN/overprint-adapt" ;;
+
+  day|slate|night|light|dark|paper)
+    # A one-off, by hand. It does not change GROUND, so if a source is driving
+    # the ground it will move it back on a later tick -- which is the honest
+    # behaviour, and `ground off` is how you stop that.
+    exec "$BIN/overprint-ground" "$1"
+    ;;
+
+  ground)
+    src="${2:-}"
+    if [[ -z $src ]]; then
+      echo "GROUND=$(get_key GROUND off)"
+      echo -n "current: "; "$BIN/overprint-ground"
+      exit 0
+    fi
+    case "$src" in
+      off|sensor|solar|both|agree) ;;
+      *) echo "usage: overprint-appearance ground [off|sensor|solar|both|agree]" >&2
+         exit 2 ;;
+    esac
+    if [[ $src == sensor || $src == both || $src == agree ]]; then
+      if [[ -z $(get_key GROUND_DAY "") || -z $(get_key GROUND_NIGHT "") ]]; then
+        echo "note: no sensor thresholds are set, so the sensor cannot decide" >&2
+        echo "      anything yet. Measure them: overprint-calibrate-ground --start" >&2
+      fi
+    fi
+    set_key GROUND "$src" || exit 1
+    echo "GROUND=$src"
+    exec "$BIN/overprint-adapt" --now
+    ;;
+
+  auto)
+    echo "\"auto\" no longer says enough -- there are two sources now." >&2
+    echo "  overprint-appearance ground sensor   the room decides (needs the camera)" >&2
+    echo "  overprint-appearance ground solar    the sun decides (no camera at all)" >&2
+    echo "  overprint-appearance ground both     sensor leads, solar covers for it" >&2
+    exit 2 ;;
+
   status)
     grep -E "^(BRIGHTNESS|BRIGHT_MIN|BRIGHT_MAX|BRIGHT_KNEE|MANUAL_HOLD)=" "$CONF" 2>/dev/null \
       || echo "BRIGHTNESS=on (defaults)"
+    echo
+    g=$(get_key GROUND off)
+    echo "GROUND= $g"
+    if [[ $g != off ]]; then
+      d=$(get_key GROUND_DAY ""); n=$(get_key GROUND_NIGHT "")
+      if [[ -n $d && -n $n ]]; then
+        echo "        thresholds: night <=$n, day >=$d, slate between"
+      else
+        echo "        NOT CALIBRATED -- the sensor cannot decide anything."
+        echo "        overprint-calibrate-ground --start"
+      fi
+      [[ $g == solar || $g == both || $g == agree ]] &&
+        echo "        solar: LOCATE=$(get_key LOCATE off) (timezone is tried first either way)"
+    fi
+    echo -n "ground: "; "$BIN/overprint-ground"
     echo "theme:  $(omarchy theme current 2>/dev/null)"
-    echo -n "light:  "; "$HOME/.local/bin/overprint-light" || echo "unavailable"
+    echo -n "light:  "; "$BIN/overprint-light" || echo "unavailable"
     # Report the state the adapter is actually acting on, so a stuck system
     # explains itself instead of needing the journal.
     if [[ -f $STATE ]]; then
@@ -54,13 +122,18 @@ if st.get("bl_set_pct") is not None:
 mu = st.get("manual_until", 0)
 if mu > time.time():
     print(f"HELD:   manual brightness override, {(mu-time.time())/60:.0f}m left")
+v = st.get("votes") or []
+if v:
+    print(f"votes:  {len(v)} tick(s) now agreeing on {v[-1]}")
+ls = st.get("last_switch")
+if ls:
+    print(f"switch: last ground change {(time.time()-ls)/60:.0f}m ago")
 PY
     fi
     [[ -f $HOLD ]] && echo "HELD:   overprint-appearance resume" || true
     ;;
-  auto|light|dark)
-    echo "Overprint is one theme now -- there is no $1 level to switch to." >&2
-    echo "Wallpapers: omarchy theme background" >&2
-    exit 2 ;;
-  *) echo "usage: overprint-appearance [on|off|hold|resume|status]" >&2; exit 2 ;;
+  *) echo "usage: overprint-appearance [on|off|hold|resume|status]" >&2
+     echo "       overprint-appearance [day|slate|night]" >&2
+     echo "       overprint-appearance ground [off|sensor|solar|both|agree]" >&2
+     exit 2 ;;
 esac

@@ -1,5 +1,5 @@
 [Unit]
-Description=Adapt the backlight to room light
+Description=Adapt the backlight, and the Overprint ground, to the room
 # The adapter talks to Hyprland, the theme tool and the backlight, none of which
 # exist before the graphical session does. Without these guards a catch-up run
 # (Persistent=true on the timer) fires at login into a half-built session and

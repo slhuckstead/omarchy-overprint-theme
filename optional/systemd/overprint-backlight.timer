@@ -1,5 +1,5 @@
 [Unit]
-Description=Check room light for backlight adaptation
+Description=Ten-minute tick for Overprint backlight and ground adaptation
 
 [Timer]
 # Every ten minutes on the clock. OnUnitActiveSec leaves NEXT unscheduled after

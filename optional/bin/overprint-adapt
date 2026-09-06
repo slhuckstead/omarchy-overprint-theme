@@ -291,22 +291,45 @@ def sun_is_up(c):
 
 
 # ---------------------------------------------------------------- ground pick
+UNREACHABLE = object()
+
+
+def threshold(c, key):
+    """A threshold is a number, blank (uncalibrated), or `off`.
+
+    `off` means this ground is NOT sensor-reachable, which is how a two-ground
+    split is expressed -- plenty of rooms have two light levels rather than
+    three, and nothing requires all three grounds to be driven by the sensor.
+    The excluded ground stays reachable by hand or by solar.
+    """
+    v = (c.get(key) or "").strip().lower()
+    if not v:      return None
+    if v == "off": return UNREACHABLE
+    try:
+        return float(v)
+    except ValueError:
+        print(f"config: {key}={c[key]!r} is not a number or 'off'; treating as unset")
+        return None
+
+
 def sensor_ground(reading, c, cur):
     """Thresholds are pushed AWAY from the ground we are already on by
     GROUND_BAND, so a reading sitting on a boundary does not oscillate. AGREE
     and DWELL are the other two brakes."""
-    if not c["GROUND_DAY"] or not c["GROUND_NIGHT"]:
+    day, night = threshold(c, "GROUND_DAY"), threshold(c, "GROUND_NIGHT")
+    if day is None or night is None:
         return None, "sensor not calibrated (run overprint-calibrate-ground)"
+    if day is UNREACHABLE and night is UNREACHABLE:
+        return None, "both bounds are off; nothing for the sensor to choose"
     if reading is None:
         return None, "no sensor reading"
-    day, night = num(c, "GROUND_DAY"), num(c, "GROUND_NIGHT")
-    if night >= day:
+    if day is not UNREACHABLE and night is not UNREACHABLE and night >= day:
         return None, "GROUND_NIGHT is not below GROUND_DAY"
     band = num(c, "GROUND_BAND")
-    up = lambda t: t + (band if cur != "day" else 0)
-    dn = lambda t: t - (band if cur != "night" else 0)
-    if reading >= up(day):   return "day", "sensor"
-    if reading <= dn(night): return "night", "sensor"
+    if day is not UNREACHABLE and reading >= day + (band if cur != "day" else 0):
+        return "day", "sensor"
+    if night is not UNREACHABLE and reading <= night - (band if cur != "night" else 0):
+        return "night", "sensor"
     # Leaving slate needs the band; arriving in it does not, or a room drifting
     # out of one extreme would have nowhere to land.
     return "slate", "sensor"

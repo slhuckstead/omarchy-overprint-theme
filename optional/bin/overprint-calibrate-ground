@@ -77,28 +77,29 @@ def samples():
     return sorted(out)
 
 
-def kmeans3(vals):
-    """Three clusters in one dimension -- night room, lit room, daylight -- by
-    Lloyd's algorithm from spread-out seeds. Returns (centres, groups) sorted by
-    centre, or None if three clusters cannot be formed at all."""
+def kmeans(vals, k):
+    """k clusters in one dimension by Lloyd's algorithm from spread-out seeds.
+    Returns (centres, groups) sorted by centre, or None if k clusters cannot be
+    formed at all. k=3 is night room / lit room / daylight; k=2 is the fallback
+    for a room that only has two levels."""
     lo, hi = min(vals), max(vals)
     if hi - lo < 1e-6:
         return None
-    cs = [lo, (lo + hi) / 2, hi]
+    cs = [lo + (hi - lo) * i / (k - 1) for i in range(k)]
     groups = None
     for _ in range(60):
-        groups = [[], [], []]
+        groups = [[] for _ in range(k)]
         for v in vals:
-            groups[min(range(3), key=lambda i: abs(v - cs[i]))].append(v)
+            groups[min(range(k), key=lambda i: abs(v - cs[i]))].append(v)
         if any(not g for g in groups):
             return None
         pairs = sorted((sum(g) / len(g), g) for g in groups)
         new = [c for c, _ in pairs]
         groups = [g for _, g in pairs]
-        if all(abs(a - b) < 1e-9 for a, b in zip(cs, new)):
-            cs = new
-            break
+        done = all(abs(a - b) < 1e-9 for a, b in zip(cs, new))
         cs = new
+        if done:
+            break
     return cs, groups
 
 
@@ -133,34 +134,61 @@ def profile(rows):
               f"  ({len(v)} sample{'s' if len(v) != 1 else ''})")
 
 
-def propose(vals, band):
-    """k-means will ALWAYS find three clusters if you ask it for three. On a
-    room whose light never really changes it splits the noise, and the
-    thresholds that come out are a hair apart -- which would flap the ground on
-    sensor jitter every ten minutes. So the split has to earn it twice:
+def separated(cs, groups, band):
+    """Has this split earned it? k-means will ALWAYS return k clusters if you ask
+    for k. On a room whose light never really changes it splits the NOISE, and
+    the thresholds that come out are a hair apart -- which would flap the ground
+    on sensor jitter every tick. So a split has to beat both:
 
-      - farther apart than the noise inside the clusters (3 pooled SDs), and
-      - farther apart than the hysteresis band can absorb (2 x GROUND_BAND),
-        or the middle ground is unreachable and one boundary swallows the other.
+      - the noise inside the clusters (3 pooled SDs), and
+      - what the hysteresis band can absorb (2 x GROUND_BAND), or a boundary is
+        unreachable and one ground swallows its neighbour.
     """
-    got = kmeans3(vals)
-    if not got:
-        return None, "the readings do not form three groups at all"
-    cs, groups = got
     sd = pooled_sd(groups)
     need = max(2.0 * band, 3.0 * sd)
-    gaps = (cs[1] - cs[0], cs[2] - cs[1])
-    if min(gaps) < need:
-        return None, (f"the three groups it found are centred at "
-                      f"{cs[0]:.1f} / {cs[1]:.1f} / {cs[2]:.1f} -- gaps of "
-                      f"{gaps[0]:.1f} and {gaps[1]:.1f}, against noise of "
-                      f"{sd:.1f} and a hysteresis band of {band:.0f}. It needs "
-                      f"{need:.1f} to mean anything")
-    # The boundary between two clusters sits midway between their centres.
-    return (round((cs[0] + cs[1]) / 2, 1), round((cs[1] + cs[2]) / 2, 1), cs), ""
+    gaps = [b - a for a, b in zip(cs, cs[1:])]
+    return min(gaps) >= need, sd, need, gaps
 
 
-def report(apply=False):
+def propose(vals, band):
+    """-> (kind, payload, why). kind is 3, 2 or None.
+
+    Three grounds if the readings support three. Otherwise TWO, because plenty
+    of rooms genuinely have two light levels and nothing says all three grounds
+    must be sensor-reachable -- refusing outright would throw away a day of
+    sampling over a room that is simply not complicated. Only if two will not
+    separate either is there nothing to say.
+    """
+    got3 = kmeans(vals, 3)
+    if got3:
+        cs, groups = got3
+        ok, sd, need, gaps = separated(cs, groups, band)
+        if ok:
+            return 3, (round((cs[0] + cs[1]) / 2, 1),
+                       round((cs[1] + cs[2]) / 2, 1), cs), ""
+        why3 = (f"three groups centred at {cs[0]:.1f} / {cs[1]:.1f} / {cs[2]:.1f}, "
+                f"gaps of {gaps[0]:.1f} and {gaps[1]:.1f}, against noise {sd:.1f} "
+                f"and a band of {band:.0f} -- needs {need:.1f}")
+    else:
+        why3 = "the readings do not form three groups at all"
+
+    got2 = kmeans(vals, 2)
+    if got2:
+        cs, groups = got2
+        ok, sd, need, gaps = separated(cs, groups, band)
+        if ok:
+            return 2, (round((cs[0] + cs[1]) / 2, 1), cs), why3
+        why2 = (f"two groups centred at {cs[0]:.1f} / {cs[1]:.1f}, gap {gaps[0]:.1f}, "
+                f"against noise {sd:.1f} and a band of {band:.0f} -- needs {need:.1f}")
+    else:
+        why2 = "nor two"
+    return None, None, f"{why3}; and {why2}"
+
+
+PAIRS = {"night-slate": ("night", "slate"), "slate-day": ("slate", "day")}
+
+
+def report(apply=False, pair=None):
     rows = samples()
     c = read_conf()
     on = c.get("GROUND_CALIBRATE", "off").lower() == "on"
@@ -188,27 +216,69 @@ def report(apply=False):
         band = float(c.get("GROUND_BAND", "6") or 6)
     except ValueError:
         band = 6.0
-    got, why = propose(vals, band)
-    if not got:
+    kind, payload, why = propose(vals, band)
+
+    if kind is None:
         print(f"No usable split: {why}.")
         print("\nEither the room genuinely holds one light level, or the camera is\n"
               "not seeing the change. The sensor cannot drive the ground here.\n"
               "Leave GROUND=off, or use GROUND=solar, which needs no sensor at all.")
         return 1
-    night, day, cs = got
-    print(f"Three light levels found, centred at "
-          f"{cs[0]:.1f} / {cs[1]:.1f} / {cs[2]:.1f}:")
-    print(f"    GROUND_NIGHT={night}   at or below this -> the night ground")
-    print(f"    GROUND_DAY={day}   at or above this -> the day (paper) ground")
-    print(f"    between the two   -> slate")
 
+    if kind == 3:
+        night, day, cs = payload
+        print(f"Three light levels found, centred at "
+              f"{cs[0]:.1f} / {cs[1]:.1f} / {cs[2]:.1f}:")
+        print(f"    GROUND_NIGHT={night}   at or below this -> the night ground")
+        print(f"    GROUND_DAY={day}   at or above this -> the day (paper) ground")
+        print(f"    between the two   -> slate")
+        if not apply:
+            print("\nWrite them with: overprint-calibrate-ground --apply")
+            return 0
+        return write(c, str(night), str(day))
+
+    # --- two levels -------------------------------------------------------
+    boundary, cs = payload
+    print(f"Only TWO light levels here, centred at {cs[0]:.1f} and {cs[1]:.1f},")
+    print(f"split at {boundary}. Three would not separate: {why}.")
+    print()
+    print("That is a usable result, not a failure -- but which two grounds it means")
+    print("is NOT something this can work out. The reading is a 0-255 camera average")
+    print("with no absolute reference, so a bright cluster at "
+          f"{cs[1]:.1f} might be daylight")
+    print("through a window or a desk lamp in an otherwise dark room. Only you know.")
+    print()
+    print("Look at the hours above. Then pick the pair that matches what you saw:")
+    print()
+    print(f"    --pair night-slate   below {boundary} -> night, above -> slate")
+    print( "                         (the bright cluster is LAMPLIGHT; day stays")
+    print( "                          reachable by hand or by solar)")
+    print(f"    --pair slate-day     below {boundary} -> slate, above -> day")
+    print( "                         (the bright cluster is DAYLIGHT; night stays")
+    print( "                          reachable by hand or by solar)")
     if not apply:
-        print("\nWrite them with: overprint-calibrate-ground --apply")
+        print("\nThen: overprint-calibrate-ground --apply --pair <one of the above>")
         return 0
+    if pair not in PAIRS:
+        print("\n--apply needs --pair here, because the choice above is yours.",
+              file=sys.stderr)
+        return 2
+    lo, hi = PAIRS[pair]
+    # `off` means "this ground is not sensor-reachable". The adapter honours it,
+    # so a two-ground split needs no special case downstream -- and it reads as
+    # what it is in the config, rather than as a sentinel number.
+    return write(c, str(boundary) if lo == "night" else "off",
+                    str(boundary) if hi == "day" else "off",
+                    note=f"{lo} below {boundary}, {hi} above; "
+                         f"{'day' if lo == 'night' else 'night'} is not sensor-reachable")
 
+
+def write(c, night, day, note=None):
     set_key("GROUND_NIGHT", night)
     set_key("GROUND_DAY", day)
     print(f"\nWritten to {CONF}.")
+    if note:
+        print(f"  {note}")
     # Read it back rather than asserting. Telling someone adaptation is off when
     # it is on is the same class of lie as a kill-switch that does not switch.
     now = read_conf().get("GROUND", "off").lower()
@@ -222,7 +292,7 @@ def report(apply=False):
         print("take effect if you switch to sensor, both or agree.")
     else:
         print(f"GROUND={now} is already on, so these thresholds are live from the")
-        print("next tick (every 10 minutes).")
+        print("next tick.")
     print("\nThe recording is no longer needed and is a log of when you were at")
     print("this machine. Delete it with: overprint-calibrate-ground --forget")
     return 0
@@ -249,7 +319,14 @@ def main(argv):
             print("Nothing recorded.")
         return 0
     if a in ("", "--apply", "--report"):
-        return report(apply=(a == "--apply"))
+        pair = None
+        if "--pair" in argv:
+            i = argv.index("--pair")
+            pair = argv[i + 1] if i + 1 < len(argv) else None
+            if pair not in PAIRS:
+                print(f"--pair must be one of: {', '.join(PAIRS)}", file=sys.stderr)
+                return 2
+        return report(apply=(a == "--apply"), pair=pair)
     print("usage: overprint-calibrate-ground "
           "[--start|--stop|--apply|--forget]", file=sys.stderr)
     return 2

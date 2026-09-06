@@ -100,7 +100,17 @@ case "${1:-status}" in
     if [[ $g != off ]]; then
       d=$(get_key GROUND_DAY ""); n=$(get_key GROUND_NIGHT "")
       if [[ -n $d && -n $n ]]; then
-        echo "        thresholds: night <=$n, day >=$d, slate between"
+        # Either bound may be `off`, meaning that ground is not sensor-reachable
+        # -- a two-ground split, for a room that only has two light levels.
+        if [[ $n == off && $d == off ]]; then
+          echo "        both bounds off -- the sensor has nothing to choose between"
+        elif [[ $n == off ]]; then
+          echo "        thresholds: day >=$d, slate below; night not sensor-reachable"
+        elif [[ $d == off ]]; then
+          echo "        thresholds: night <=$n, slate above; day not sensor-reachable"
+        else
+          echo "        thresholds: night <=$n, day >=$d, slate between"
+        fi
       else
         echo "        NOT CALIBRATED -- the sensor cannot decide anything."
         echo "        overprint-calibrate-ground --start"

@@ -290,10 +290,19 @@ overprint-calibrate-ground --apply    writes them
 overprint-calibrate-ground --forget   deletes the recording
 ```
 
-It clusters a day of readings into three and refuses to propose anything unless
-the clusters are separated by more than both the noise inside them and the
-hysteresis band — asked for three groups, k-means will always find three, even
-in a room whose light never changes.
+It clusters a day of readings and refuses to propose anything unless the clusters
+are separated by more than both the noise inside them and the hysteresis band —
+asked for k groups, k-means will always find k, even in a room whose light never
+changes.
+
+If three grounds will not separate it tries **two**, because plenty of rooms have
+two light levels and nothing requires all three grounds to be sensor-reachable —
+the excluded one stays reachable by hand and by solar. It will not guess *which*
+two: a 0-255 camera average has no absolute reference, so a bright cluster could
+be daylight through a window or a desk lamp in an otherwise dark room. It shows
+you the hour-by-hour profile and you name the pair with `--pair night-slate` or
+`--pair slate-day`. A bound set to `off` means that ground is not
+sensor-reachable.
 
 **On the camera and the journal.** The lens is opened only if something actually
 asked for a reading: backlight adaptation on, a sensor-driven ground, or

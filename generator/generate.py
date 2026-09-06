@@ -23,9 +23,16 @@ import engine, compose, palette as P, themes
 # panel that is not 16:9.
 W, H = 3840, 2160
 DEST = os.path.expanduser("~/.config/omarchy/themes")
-STOCK = "/usr/share/omarchy/themes"
 SLUG = "overprint"
-BORROW = {"day": "flexoki-light", "slate": "matte-black", "night": "matte-black"}
+# Icons are CHOSEN, not inherited. These used to be borrowed wholesale from a
+# stock theme (day from flexoki-light, the dark grounds from matte-black), which
+# is how the light variant quietly ended up on Yaru-blue while night and slate
+# ran Yaru-red -- three weights of one theme disagreeing about their own accent.
+# Overprint's accent is the harbour blue ink on every ground (#5B97D6 night,
+# #7AB8F9 slate, #0C4474 day), so the icons are blue on every ground too, and
+# Yaru's `-dark` variants carry the dark ones. Omarchy already uses that
+# convention (solitude ships Yaru-sage-dark).
+ICONS = {"day": "Yaru-blue", "slate": "Yaru-blue-dark", "night": "Yaru-blue-dark"}
 
 KEY_ORDER = ["mode", "", "accent", "selection", "muted", "",
     "background", "dark_background", "darker_background", "lighter_background", "",
@@ -711,9 +718,7 @@ def dist(outdir, force=False, width=None, previews=False, level=None):
                         os.path.join(outdir, f)], check=False)
     print(f"  previews: {len(todo)} written, {len(want)-len(todo)} kept")
 
-    borrowed = os.path.join(STOCK, BORROW[level], "icons.theme")
-    if os.path.exists(borrowed):
-        shutil.copy(borrowed, os.path.join(outdir, "icons.theme"))
+    open(os.path.join(outdir, "icons.theme"), "w").write(ICONS[level] + "\n")
 
     # The repo ships the generator so anyone can make the other 120.
     TITLES = {"night": "Overprint", "slate": "Overprint Slate",
@@ -821,9 +826,7 @@ def _finish(d, bg, press, level, presses, levels, n, cols):
                         "-define", "png:compression-level=9",
                         os.path.join(d, f)], check=False)
 
-    borrowed = os.path.join(STOCK, BORROW[level], "icons.theme")
-    if os.path.exists(borrowed):
-        shutil.copy(borrowed, os.path.join(d, "icons.theme"))
+    open(os.path.join(d, "icons.theme"), "w").write(ICONS[level] + "\n")
     print(f"\n  {os.path.basename(d)}: palette {press}-{level}, bg {cols['background']}, "
           f"{n} wallpapers")
     # Two slots solving to the same colour is the failure a contrast check
@@ -943,15 +946,17 @@ def check(level=None):
             if not c["enforced"]:
                 print(f"         note: closest {c['kind']} pair {c['a']}/{c['b']} "
                       f"{c['dist']:.4f} (not gated)")
-        # Exit status tracks what actually SHIPS. day and slate are reported
-        # because they are what a light variant would have to fix, but they are
-        # not built today, and failing on them would make this read as "the
-        # theme is broken" when it is not.
-        if lv == themes.CANON_LEVEL or level:
-            rc |= 1 if (P.FALLBACKS or enf) else 0
+        # Exit status tracks what actually SHIPS -- which is now ALL THREE
+        # grounds, each a published theme of its own. It used to gate on the
+        # canon ground alone, correctly, back when day and slate were only
+        # reported as what a light variant would have to fix. Left that way it
+        # would print "ok" and exit 0 with a shipped theme broken, which is the
+        # same class of lie as the "0 contrast failures" this file used to
+        # claim while both counts were wrong.
+        rc |= 1 if (P.FALLBACKS or enf) else 0
     if not level:
-        print(f"\n  exit status reflects {themes.CANON_LEVEL} (the shipped ground) "
-              f"only; ask for a level by name to gate on it")
+        print(f"\n  exit status gates on all {len(levels)} shipped grounds "
+              f"({', '.join(levels)}); ask for one by name to gate on it alone")
     return rc
 
 

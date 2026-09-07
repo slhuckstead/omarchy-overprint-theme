@@ -10,7 +10,7 @@ is a fact about this image and not about the program.
     overprint-colophon              the wallpaper currently displayed
     overprint-colophon <name>       any wallpaper, by stem or path
 """
-import os, sys, glob, zlib, tomllib, datetime, subprocess
+import os, sys, glob, json, zlib, tomllib, datetime, subprocess
 
 GEN = os.path.expanduser("~/.local/share/overprint")
 STATE = os.path.expanduser("~/.local/state/omarchy/current")
@@ -69,7 +69,18 @@ def main(argv):
     try:
         import engine, themes
         inks = themes.INKS.get(press, t.get("inks", []))
-        reg = engine.registration(zlib.crc32(stem.encode()))
+        # The ledger wins where it has an entry: a re-pulled sheet was made
+        # with an id that is NOT crc32(stem), and deriving one here would state
+        # a registration the image does not have.
+        pull_id, from_ledger = zlib.crc32(stem.encode()), False
+        try:
+            led = json.load(open(os.path.expanduser(
+                "~/.local/state/overprint/pulls.json")))
+            if stem in led:
+                pull_id, from_ledger = int(led[stem]["pull"]), True
+        except Exception:
+            pass
+        reg = engine.registration(pull_id)
         angles, cell_ref = engine.ANGLES, 8.0
     except Exception:
         inks, reg, angles, cell_ref = t.get("inks", []), None, None, None
@@ -100,7 +111,8 @@ def main(argv):
         eng_mtime = os.path.getmtime(os.path.join(GEN, "engine.py"))
     except OSError:
         eng_mtime = None
-    stale = eng_mtime is not None and os.path.getmtime(path) < eng_mtime
+    stale = (not from_ledger and eng_mtime is not None
+             and os.path.getmtime(path) < eng_mtime)
     if reg and not stale:
         print(f"  registered plate 1 at origin")
         for i, (dx, dy) in enumerate(reg[1:], start=2):

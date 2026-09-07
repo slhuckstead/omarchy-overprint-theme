@@ -50,6 +50,20 @@ survives.
 Use that when tuning colour; it avoids rewriting every image underneath a theme
 you currently have applied.
 
+## Re-pulling a sheet
+
+```
+overprint-repull            # the wallpaper on screen, pulled again
+overprint-repull --status   # what has been re-pulled, and when
+```
+
+A given sheet is otherwise fixed from the moment it is generated. This pulls it
+again with a fresh registration; a weekly timer ships alongside, not enabled.
+
+The pull id is recorded in `~/.local/state/overprint/pulls.json`, because a PNG
+does not record how its plates landed and `overprint-colophon` would otherwise
+keep reporting the registration of an impression that no longer exists.
+
 ## Proofing the plates
 
 ```

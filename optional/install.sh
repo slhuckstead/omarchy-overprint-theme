@@ -75,7 +75,13 @@ if [[ $WANT_SCREENSAVER == yes ]]; then
                 "$HERE"/bin/overprint-make-launcher-shadow "$BIN"/
   # Not screensaver-specific, but they belong on PATH and this is the only
   # install path the theme has.
-  install -m755 "$HERE"/bin/overprint-make-preview "$HERE"/bin/overprint-colophon "$BIN"/
+  install -m755 "$HERE"/bin/overprint-make-preview "$HERE"/bin/overprint-colophon \
+                "$HERE"/bin/overprint-repull "$BIN"/
+  # Weekly re-pull of the current wallpaper. Installed, deliberately NOT enabled:
+  #   systemctl --user enable --now overprint-repull.timer
+  install -m644 "$HERE"/systemd/overprint-repull.service \
+                "$HERE"/systemd/overprint-repull.timer "$UNITS"/
+  mkdir -p "$UNITS"
 
   if ! grep -qF "$MARK_BEGIN" "$HOME/.bashrc" 2>/dev/null; then
     cat >> "$HOME/.bashrc" <<EOF

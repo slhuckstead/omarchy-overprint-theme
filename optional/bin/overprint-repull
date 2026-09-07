@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""Pull the current wallpaper again, with a fresh registration.
+
+A press does not produce the same sheet twice. The wallpapers already differ
+from each OTHER, but a given sheet was fixed from the moment it was generated;
+this re-pulls it, so the image on your desktop is a new impression rather than
+the same one indefinitely.
+
+    overprint-repull              the wallpaper currently displayed
+    overprint-repull <stem>       a named one
+    overprint-repull --status     what has been re-pulled, and when
+
+THE LEDGER MATTERS. A PNG does not record how its plates landed, so
+overprint-colophon derives the registration from crc32(stem) -- true only while
+that is the id the sheet was actually pulled with. Re-pulling with a new id
+without recording it would make the colophon confidently wrong, which is the
+failure this project keeps finding. So every re-pull writes its id here and the
+colophon prefers it.
+"""
+import os, sys, json, time, zlib, subprocess
+
+GEN = os.path.expanduser("~/.local/share/overprint")
+STATE = os.path.expanduser("~/.local/state/overprint")
+LEDGER = f"{STATE}/pulls.json"
+THEMES = os.path.expanduser("~/.config/omarchy/themes")
+USER_BG = os.path.expanduser("~/.config/omarchy/backgrounds")
+CURRENT = os.path.expanduser("~/.local/state/omarchy/current/background")
+
+
+def ledger():
+    try:    return json.load(open(LEDGER))
+    except Exception: return {}
+
+
+def save(d):
+    os.makedirs(STATE, exist_ok=True)
+    tmp = LEDGER + ".tmp"
+    json.dump(d, open(tmp, "w"), indent=2)
+    os.replace(tmp, LEDGER)
+
+
+def find(stem):
+    for d in (f"{THEMES}/*/backgrounds", f"{USER_BG}/*"):
+        import glob
+        hits = glob.glob(f"{d}/{stem}.png")
+        if hits: return os.path.realpath(hits[0])
+    return None
+
+
+def main(argv):
+    if argv and argv[0] in ("-h", "--help"):
+        print(__doc__.strip()); return 0
+    if argv and argv[0] in ("--status", "status"):
+        led = ledger()
+        if not led:
+            print("nothing re-pulled yet"); return 0
+        for stem, e in sorted(led.items(), key=lambda kv: -kv[1]["at"]):
+            print(f"  {stem:32} pull {e['pull']:>10}  "
+                  f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(e['at']))}")
+        return 0
+
+    if argv:
+        stem = argv[0][:-4] if argv[0].endswith(".png") else argv[0]
+        path = find(stem)
+    else:
+        try:    path = os.path.realpath(os.readlink(CURRENT))
+        except OSError: path = None
+        stem = os.path.basename(path)[:-4] if path else None
+    if not path or not os.path.isfile(path):
+        print("no such wallpaper", file=sys.stderr); return 1
+
+    parts = stem.split("-", 2)
+    if len(parts) != 3:
+        print(f"{stem} is not one of this generator's sheets", file=sys.stderr); return 1
+    wp, wl, comp = parts
+
+    sys.path.insert(0, GEN)
+    import engine, compose, themes
+    # magick for the size, as everywhere else here -- PIL is not a dependency
+    # of this project and adding one for two integers would be a poor trade.
+    r = subprocess.run(["magick", "identify", "-format", "%w %h", path],
+                       capture_output=True, text=True, timeout=20)
+    try:
+        w, h = (int(x) for x in r.stdout.split())
+    except ValueError:
+        print(f"could not read the size of {path}", file=sys.stderr); return 1
+
+    # A new id, not derived from the stem -- that is the whole point.
+    pull = zlib.crc32(f"{stem}:{time.time_ns()}".encode())
+    wall = themes.level_wallpaper(wp, wl)
+    pal = dict(inks=themes.INKS[wp], paper=wall, night=wall)
+    order = [v[0] for v in compose.VARIANTS]
+    img = engine.render(w, h, compose.make(comp, w, h), pal,
+                        night=themes.is_dark(wl), cell=8.0,
+                        seed=1000 + order.index(comp) * 17, pull=pull)
+    engine.write_png(path, img)
+    subprocess.run(["magick", "mogrify", "-colors", "256",
+                    "-define", "png:exclude-chunk=time",
+                    "-define", "png:compression-level=9", path], check=False)
+
+    led = ledger(); led[stem] = dict(pull=pull, at=int(time.time()))
+    save(led)
+
+    reg = engine.registration(pull)
+    print(f"  re-pulled {stem} at {w}x{h}")
+    for i, (dx, dy) in enumerate(reg[1:], start=2):
+        print(f"    plate {i} {dx:+.2f}, {dy:+.2f} px")
+    # The file changed under the symlink; nudge the shell to reload it.
+    subprocess.run(["omarchy-theme-bg-set", path], capture_output=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

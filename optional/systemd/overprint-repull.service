@@ -1,0 +1,12 @@
+[Unit]
+Description=Pull the current Overprint wallpaper again, with a fresh registration
+# It rewrites the file the shell is displaying and asks the shell to reload it,
+# so it needs the graphical session for the same reasons the adapter does.
+After=graphical-session.target
+PartOf=graphical-session.target
+ConditionEnvironment=WAYLAND_DISPLAY
+OnFailure=overprint-failure-notify@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/overprint-repull

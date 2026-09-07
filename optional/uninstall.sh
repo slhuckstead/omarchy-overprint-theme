@@ -7,11 +7,13 @@ UPDATE_HOOKS="$HOME/.config/omarchy/hooks/post-update.d"
 MARK_BEGIN="# >>> overprint PATH >>>"; MARK_END="# <<< overprint PATH <<<"
 
 systemctl --user disable --now overprint-backlight.timer 2>/dev/null
+systemctl --user disable --now overprint-repull.timer 2>/dev/null
+rm -f "$UNITS"/overprint-repull.{timer,service}
 rm -f "$UNITS"/overprint-backlight.{timer,service} "$UNITS"/overprint-failure-notify@.service
 systemctl --user daemon-reload 2>/dev/null
 
 rm -f "$BIN"/overprint-{screensaver,screensaver-run,screensaver-plate,make-launcher-shadow} \
-      "$BIN"/overprint-make-preview "$BIN"/overprint-colophon \
+      "$BIN"/overprint-make-preview "$BIN"/overprint-colophon "$BIN"/overprint-repull \
       "$BIN"/overprint-{light,adapt,appearance,notify-failure} \
       "$BIN"/overprint-{ground,calibrate-ground} \
       "$BIN"/omarchy-launch-screensaver \

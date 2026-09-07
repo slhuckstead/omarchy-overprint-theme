@@ -1003,6 +1003,77 @@ def for_display(level=None):
     return 0
 
 
+def proof(comp=None, level=None, out=None, w=900):
+    """A printer's proof: each separation pulled on its own, then the composite.
+
+    Nothing in this project has ever shown the plates apart, which is odd for a
+    theme whose whole claim is what three inks do when they overlap. A proof is
+    how a printer checks registration before running the job -- pull each plate
+    alone, lay them beside the composite, and see where they land.
+
+    Zeroing the other plates rather than shortening the list matters: the engine
+    indexes ANGLES and the registration by POSITION, so a two-element list would
+    silently give plate 3 plate 1's screen angle and offset.
+    """
+    comp = comp or "4-modulor"
+    level = level or themes.CANON_LEVEL
+    if comp not in [v[0] for v in compose.VARIANTS]:
+        print(f"  no such composition: {comp}", file=sys.stderr)
+        print("  " + ", ".join(v[0] for v in compose.VARIANTS), file=sys.stderr)
+        return 2
+    press = themes.CANON_PRESS
+    h = int(round(w / (DIST_W / DIST_H)))
+    wall = themes.level_wallpaper(press, level)
+    pal = dict(inks=themes.INKS[press], paper=wall, night=wall)
+    plates = compose.make(comp, w, h)
+    stem = f"{press}-{level}-{comp}"
+    pull = zlib.crc32(stem.encode())
+    reg = engine.registration(pull)
+    night = themes.is_dark(level)
+
+    tmp = os.path.join(os.path.expanduser("~/.cache"), "overprint-proof")
+    os.makedirs(tmp, exist_ok=True)
+    zero = [p * 0 for p in plates]
+    names = []
+    for i in range(3):
+        only = list(zero)
+        only[i] = plates[i]
+        img = engine.render(w, h, only, pal, night=night, cell=8.0,
+                            seed=1000, misreg=reg)
+        f = os.path.join(tmp, f"plate{i+1}.png")
+        engine.write_png(f, img); names.append(f)
+    img = engine.render(w, h, plates, pal, night=night, cell=8.0,
+                        seed=1000, misreg=reg)
+    f = os.path.join(tmp, "composite.png")
+    engine.write_png(f, img); names.append(f)
+
+    out = out or os.path.expanduser(f"~/Pictures/overprint-proof-{stem}.png")
+    font = subprocess.run(["fc-match", "-f", "%{file}", "Liberation Sans"],
+                          capture_output=True, text=True).stdout.strip()
+    caps = [f"plate 1   {themes.INKS[press][0]}   screen {engine.ANGLES[0]:g}deg   registered to origin"]
+    for i in (1, 2):
+        caps.append(f"plate {i+1}   {themes.INKS[press][i]}   screen "
+                    f"{engine.ANGLES[i]:g}deg   {reg[i][0]:+.2f}, {reg[i][1]:+.2f} px")
+    caps.append(f"composite   {stem}   ground {themes.level_ground(press, level)}")
+    tiles = []
+    for f, cap in zip(names, caps):
+        t = f.replace(".png", "-cap.png")
+        subprocess.run(["magick", f, "-background", "#111", "-gravity", "north",
+                        "-splice", "0x40", "-font", font, "-pointsize", "17",
+                        "-fill", "#ddd", "-annotate", "+0+11", cap,
+                        "-bordercolor", "#111", "-border", "10", t], check=True)
+        tiles.append(t)
+    subprocess.run(["magick", tiles[0], tiles[1], "+append",
+                    os.path.join(tmp, "r1.png")], check=True)
+    subprocess.run(["magick", tiles[2], tiles[3], "+append",
+                    os.path.join(tmp, "r2.png")], check=True)
+    subprocess.run(["magick", os.path.join(tmp, "r1.png"),
+                    os.path.join(tmp, "r2.png"), "-append", out], check=True)
+    print(f"  proof -> {out}")
+    print(f"  {stem}: three separations and the composite, at {w}x{h} each")
+    return 0
+
+
 def check(level=None):
     """Report contrast and separation for a ground without building anything.
 
@@ -1051,6 +1122,12 @@ if __name__ == "__main__":
     if "--for-display" in sys.argv[1:]:
         args = [a for a in sys.argv[1:] if not a.startswith("--")]
         sys.exit(for_display(args[0] if args else None))
+
+    if "--proof" in sys.argv[1:]:
+        args = [a for a in sys.argv[1:] if not a.startswith("--")]
+        comp = next((a for a in args if a[0].isdigit()), None)
+        lvl = next((a for a in args if a in themes.LEVELS), None)
+        sys.exit(proof(comp, lvl))
 
     if "--check" in sys.argv[1:]:
         args = [a for a in sys.argv[1:] if not a.startswith("--")]

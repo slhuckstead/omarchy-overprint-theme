@@ -50,6 +50,17 @@ survives.
 Use that when tuning colour; it avoids rewriting every image underneath a theme
 you currently have applied.
 
+## Proofing the plates
+
+```
+python3 generator/generate.py --proof            # the canon ground
+python3 generator/generate.py --proof 7-spiral day
+```
+
+Each separation pulled on its own, then the composite — how a printer checks
+registration before running a job. It is also the quickest way to see that the
+compositions are genuinely separated rather than three copies of one shape.
+
 ## Every sheet is its own pull
 
 Plate registration drifts per impression. It used to be a module constant, so

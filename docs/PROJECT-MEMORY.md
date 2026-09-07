@@ -25,6 +25,13 @@ LAST_SESSION: 2026-09-07 -- read the overnight ground calibration and settled th
   where cluster noise really is the blocker. Verified against three fixtures (band-bound,
   band-bound-then-lowered, genuinely noisy); the lowered-band fixture reproduces the
   28.6 / 35.3 thresholds predicted by hand from last night's numbers.
+  Then went further, on Seth's push: GROUND_BAND is no longer an input to the gate at all.
+  It is derived from the run's pooled SD and written by --apply, the gate is the noise
+  floor alone, and a new reachable() check marks an outer ground `off` when the band puts
+  it outside the readings actually seen. The consequence is recorded above -- this data
+  DOES support a three-way sensor split, so solar is now a robustness choice rather than
+  the only option. A hypothesis that the reachability check was provably redundant was
+  tested by fuzzing and disproved: it fires on about one three-way split in nine.
 PREVIOUS_SESSION: 2026-09-06 -- twelve commits across the three repos. Closed the five-item
   agreed scope (screensaver across variants, variant installers, app-theme audit,
   wallpaper cycling, sensor+solar ground adaptation) and a five-item follow-on list
@@ -47,19 +54,19 @@ BACKLOG:
   2. Upstream issue omacom/omarchy#10533 (dimText below AA on 19 of 22 first-party
      themes) awaits triage. If they fix it, DELETE ~/.config/omarchy/themed/pi.json.tpl
      or it shadows their template indefinitely.
-  3. If the sensor ground is ever revisited it needs BOTH, and neither alone is enough:
-     a run that covers 10:00-14:00 (the peak this one missed), and a GROUND_BAND derived
-     from measured noise rather than the shipped 6. Nothing is blocked on it -- solar
-     covers slate and night; only the day/paper ground stays manual.
+  3. If the sensor ground is ever revisited: just re-run --start / --apply over a full
+     day that includes 10:00-14:00. The band is derived now, so there is nothing to
+     decide first. Nothing is blocked on it -- solar covers slate and night; only the
+     day/paper ground stays manual.
 CURRENT_PHASE: Feature-complete against both agreed lists (5 of 5, and 5 of 5), with the
   ground source now settled by measurement rather than left open. One item unverified
   (the boot screen), which needs a reboot rather than work.
 BRANCH: main
-COMMIT: f0b3e28
+COMMIT: f8ae8b4
 WRITTEN: 2026-09-07
 ```
 
-## Calibration result -- the sensor cannot drive the ground here (2026-09-07)
+## Calibration result -- GROUND=solar, but the camera was never the problem (2026-09-07)
 
 19.2 hours, 242 samples, unbroken 5-minute cadence, Sun 14:33 to Mon 09:50.
 `overprint-calibrate-ground` rejected both a three-way and a two-way split and printed
@@ -79,7 +86,12 @@ four times the noise actually present, and the third of three anti-flap brakes (
 ground is fed the smoothed median at `overprint-adapt:561`, then AGREE=2, then DWELL=900).
 At `GROUND_BAND=2.8` or below the three-way split passes.
 
-Solar is still the right answer, for reasons the arithmetic does not reach:
+**The band is now derived, and that changes the finding.** Later the same session the
+band was made an output of the calibration rather than an input to it (1.5 pooled SDs,
+floored at 2.0), and the gate reduced to the noise floor alone. Re-run against last
+night's numbers that yields a usable three-way split -- GROUND_NIGHT=28.6,
+GROUND_DAY=35.3, GROUND_BAND=2.3. So the honest statement is NOT "the sensor cannot
+drive the ground here." It can. Solar is a robustness choice, not a forced one:
 
 - **The run missed the brightest hours.** The top eight readings are all Mon 09:00-09:35
   and the curve was still climbing when it stopped; 10:00-14:00 was never sampled. The
@@ -93,6 +105,10 @@ Solar is still the right answer, for reasons the arithmetic does not reach:
 - **Solar needs no camera, no per-machine number and no recalibration.** Its one cost is
   that `GROUND_SOLAR_DAY=slate` and `GROUND_SOLAR_NIGHT=night`, so the day/paper ground
   is only ever reached by hand.
+
+If the sensor is ever wanted, the route is now short: run `--start`, use the machine for
+a full day INCLUDING 10:00-14:00, and `--apply`. The tool will propose rather than
+refuse, and it writes the band itself. Nothing needs deciding in advance.
 
 Cluster figures worth keeping, since the raw timeline was deleted as an occupancy log:
 range 23.2-44.0; k=3 centres 24.7 / 32.4 / 38.1 with gaps 7.7 and 5.6; k=2 centres
@@ -130,8 +146,16 @@ Recorded because each cost real time and none is discoverable from the code alon
 - **`pkill -f` self-matches your own command line from anywhere in it**, not just the
   pattern. Kill by PID when the command line mentions the target for any other reason.
 
-- **`GROUND_BAND` gates calibration, not just runtime.** `overprint-calibrate-ground`
-  demands `max(2 x GROUND_BAND, 3 x pooled SD)` of separation between clusters, so a
-  shipped hysteresis default silently decides whether a whole day of sampling can ever
-  succeed -- and when it fails it blames the camera. Check which of the two terms is
-  binding before believing the verdict.
+- **`GROUND_BAND` is an OUTPUT of calibration, not an input.** It used to be both: the
+  gate demanded `max(2 x GROUND_BAND, 3 x pooled SD)`, so a shipped hysteresis default
+  silently decided whether a day of sampling could succeed, and blamed the camera when it
+  did not. Fixed 2026-09-07 -- the gate is the noise floor alone and `--apply` writes the
+  band from the measurement. The shipped `6` in `overprint-adapt` and the example config
+  is inert until the thresholds exist, so do not bother "tuning" it.
+- **The 2.0 floor on the derived band is what keeps `reachable()` alive.** While
+  `band == 1.5 x sd` the gate guarantees every threshold sits a full band inside the
+  observed range, and the check is a tautology. The floor -- which exists so a quiet run
+  cannot produce a hair-trigger band -- breaks that balance on low-noise rooms, and then
+  an outer ground genuinely can be unenterable. Fuzzing puts it at roughly one in nine
+  successful three-way splits. Removing `reachable()` as dead code requires removing the
+  floor first.

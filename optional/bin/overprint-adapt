@@ -45,7 +45,8 @@ DEFAULTS = dict(
     # --- ground adaptation: off, and inert until calibrated ---
     GROUND="off",                 # off | sensor | solar | both | agree
     GROUND_DAY="", GROUND_NIGHT="",   # blank == not calibrated
-    GROUND_BAND="6",              # hysteresis around both thresholds
+    GROUND_BAND="6",              # hysteresis around both thresholds; inert until
+                                  # calibrated, and overwritten by --apply
     GROUND_SOLAR_DAY="day", GROUND_SOLAR_NIGHT="night",
     AGREE="2", DWELL="900",
     LOCATE="off",                 # off | ip   (timezone is always tried first)

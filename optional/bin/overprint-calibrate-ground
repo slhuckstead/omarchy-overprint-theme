@@ -7,6 +7,10 @@
     overprint-calibrate-ground --stop    stop recording
     overprint-calibrate-ground --forget  delete the recording
 
+It writes GROUND_BAND as well as the two thresholds: the band is hysteresis
+measured in reading-units, so the noise this run measures is exactly what sets
+it, and a threshold written without its band is only half an answer.
+
 There are no shipped numbers to fall back on and there should not be. The
 webcam reports a 0-255 average through a LOCKED exposure, so what a reading
 means depends on the sensor, the lens, where the laptop sits and which way the
@@ -134,30 +138,77 @@ def profile(rows):
               f"  ({len(v)} sample{'s' if len(v) != 1 else ''})")
 
 
-def separated(cs, groups, band):
+def derive_band(sd):
+    """The hysteresis band, measured rather than guessed.
+
+    GROUND_BAND is how far past a threshold a reading must travel before the
+    ground changes, so its natural unit is the NOISE of the reading -- which
+    this run has just measured. 1.5 pooled SDs is deliberate: it makes
+    2 x band equal the 3 x SD noise floor exactly, so the band can never demand
+    more separation than the noise already does. It is also the third of three
+    brakes (the ground is fed a running median, then AGREE, then DWELL), so it
+    does not have to survive a spurious sample on its own.
+
+    Floored at 2.0 because a quiet run -- an empty room, a closed lid, a lens
+    staring at its own black floor -- measures a calm the room does not really
+    have, and a band of nearly zero would flap on the first real day.
+
+    That floor is also the ONLY reason reachable() has anything to do. While
+    band == 1.5 x sd the two constants are balanced and every threshold sits at
+    least a band inside the observed range automatically; once the floor takes
+    over on a low-noise room the balance breaks and an outer ground really can
+    become unenterable. Measured by fuzzing: a ground is marked off in about one
+    in nine successful three-way splits. Do not "simplify" reachable() away
+    without removing the floor first.
+    """
+    return max(2.0, round(1.5 * sd, 1))
+
+
+def separated(cs, groups):
     """Has this split earned it? k-means will ALWAYS return k clusters if you ask
     for k. On a room whose light never really changes it splits the NOISE, and
     the thresholds that come out are a hair apart -- which would flap the ground
-    on sensor jitter every tick. So a split has to beat both:
+    on sensor jitter every tick. So a split has to beat the spread WITHIN the
+    clusters: 3 pooled SDs between neighbouring centres.
 
-      - the noise inside the clusters (3 pooled SDs), and
-      - what the hysteresis band can absorb (2 x GROUND_BAND), or a boundary is
-        unreachable and one ground swallows its neighbour.
-
-    Also reports WHICH of the two set the requirement. That distinction is the
-    whole difference between "your camera cannot see this room" and "GROUND_BAND
-    is wider than this room", and only one of those is worth acting on.
+    That is the ONLY gate, and it is deliberately a question about the room and
+    the camera rather than about the config. GROUND_BAND used to sit here as a
+    second term, which meant a runtime setting decided whether a day of sampling
+    could succeed -- and whenever its shipped default was wider than the room,
+    the refusal blamed the camera. The band is now derived from the same sd this
+    returns (derive_band) and checked for consequences separately (reachable),
+    so no value in the config file can cause or cure a refusal.
     """
     sd = pooled_sd(groups)
-    by_band, by_noise = 2.0 * band, 3.0 * sd
-    need = max(by_band, by_noise)
-    binding = "band" if by_band >= by_noise else "noise"
+    need = 3.0 * sd
     gaps = [b - a for a, b in zip(cs, cs[1:])]
-    return min(gaps) >= need, sd, need, gaps, binding
+    return min(gaps) >= need, sd, need, gaps
 
 
-def propose(vals, band):
-    """-> (kind, payload, why, diag). kind is 3, 2 or None.
+def reachable(which, thr, band, rlo, rhi):
+    """Can that outer ground actually be ENTERED, given the readings seen?
+
+    Leaving slate costs the band (see sensor_ground in overprint-adapt), so day
+    needs a reading of thr + band and night one of thr - band. If a whole day of
+    sampling never saw such a reading, that ground is not sensor-reachable, and
+    saying so is better than writing a threshold that can never fire.
+
+    This is what the old band term in the gate was groping at, and it is a
+    better test: it asks the observed extremes instead of a proxy for them, and
+    its answer is per-ground rather than a blanket refusal -- an unreachable
+    outer ground is marked off, and only if BOTH are unreachable does the
+    three-way split give way to the two-level path.
+
+    Reachable by construction whenever band == 1.5 x sd; see derive_band for the
+    floor that makes this a live check rather than a tautology.
+    """
+    if which == "day":
+        return rhi >= thr + band, thr + band
+    return rlo <= thr - band, thr - band
+
+
+def propose(vals):
+    """-> (kind, plan, why, diag). kind is 3, 2 or None.
 
     Three grounds if the readings support three. Otherwise TWO, because plenty
     of rooms genuinely have two light levels and nothing says all three grounds
@@ -165,46 +216,69 @@ def propose(vals, band):
     sampling over a room that is simply not complicated. Only if two will not
     separate either is there nothing to say.
 
+    `plan` carries the thresholds AND the band derived from the same numbers,
+    because a threshold without the band that guards it is only half an answer.
     On a refusal, `diag` describes the split that came CLOSEST -- its tightest
-    gap, the requirement it missed, and which term set that requirement. A
-    refusal that cannot say what to change is indistinguishable from a broken
-    camera, and this one used to read like one.
+    gap and the noise it had to beat. A refusal that cannot say what to change
+    is indistinguishable from a broken camera, and this one used to read like
+    one.
     """
+    rlo, rhi = min(vals), max(vals)
     diag = None
 
-    def closest(k, gaps, sd, need, binding):
+    def closest(k, gaps, sd, need):
         """Keep whichever k came nearest, scored as a fraction of what it needed
         -- gaps from different k are not comparable in absolute terms."""
         nonlocal diag
         short = min(gaps)
         ratio = short / need if need > 0 else 0.0
         if diag is None or ratio > diag["ratio"]:
-            diag = {"k": k, "gap": short, "sd": sd, "need": need,
-                    "binding": binding, "ratio": ratio}
+            diag = {"k": k, "gap": short, "sd": sd, "need": need, "ratio": ratio}
 
     got3 = kmeans(vals, 3)
     if got3:
         cs, groups = got3
-        ok, sd, need, gaps, binding = separated(cs, groups, band)
+        ok, sd, need, gaps = separated(cs, groups)
         if ok:
-            return 3, (round((cs[0] + cs[1]) / 2, 1),
-                       round((cs[1] + cs[2]) / 2, 1), cs), "", None
-        closest(3, gaps, sd, need, binding)
-        why3 = (f"three groups centred at {cs[0]:.1f} / {cs[1]:.1f} / {cs[2]:.1f}, "
-                f"gaps of {gaps[0]:.1f} and {gaps[1]:.1f}, against noise {sd:.1f} "
-                f"and a band of {band:.0f} -- needs {need:.1f}")
+            band = derive_band(sd)
+            night = round((cs[0] + cs[1]) / 2, 1)
+            day = round((cs[1] + cs[2]) / 2, 1)
+            n_ok, n_at = reachable("night", night, band, rlo, rhi)
+            d_ok, d_at = reachable("day", day, band, rlo, rhi)
+            notes = []
+            if not n_ok:
+                notes.append(f"night would need a reading of {n_at:.1f} and this run "
+                             f"never went below {rlo:.1f} -- marked off, so night stays "
+                             f"reachable by hand or by solar")
+            if not d_ok:
+                notes.append(f"day would need a reading of {d_at:.1f} and this run "
+                             f"never reached {d_at:.1f} (peak {rhi:.1f}) -- marked off, "
+                             f"so the paper ground stays reachable by hand")
+            if n_ok or d_ok:
+                return 3, {"cs": cs, "sd": sd, "band": band, "notes": notes,
+                           "night": night if n_ok else "off",
+                           "day": day if d_ok else "off"}, "", None
+            why3 = (f"three groups did separate, but with a band of {band:g} neither "
+                    f"outer ground is reachable inside the observed {rlo:.1f}-{rhi:.1f}")
+        else:
+            closest(3, gaps, sd, need)
+            why3 = (f"three groups centred at {cs[0]:.1f} / {cs[1]:.1f} / {cs[2]:.1f}, "
+                    f"gaps of {gaps[0]:.1f} and {gaps[1]:.1f}, against noise {sd:.1f} "
+                    f"-- needs {need:.1f}")
     else:
         why3 = "the readings do not form three groups at all"
 
     got2 = kmeans(vals, 2)
     if got2:
         cs, groups = got2
-        ok, sd, need, gaps, binding = separated(cs, groups, band)
+        ok, sd, need, gaps = separated(cs, groups)
         if ok:
-            return 2, (round((cs[0] + cs[1]) / 2, 1), cs), why3, None
-        closest(2, gaps, sd, need, binding)
+            return 2, {"boundary": round((cs[0] + cs[1]) / 2, 1), "cs": cs,
+                       "sd": sd, "band": derive_band(sd),
+                       "range": (rlo, rhi)}, why3, None
+        closest(2, gaps, sd, need)
         why2 = (f"two groups centred at {cs[0]:.1f} / {cs[1]:.1f}, gap {gaps[0]:.1f}, "
-                f"against noise {sd:.1f} and a band of {band:.0f} -- needs {need:.1f}")
+                f"against noise {sd:.1f} -- needs {need:.1f}")
     else:
         why2 = "nor two"
     return None, None, f"{why3}; and {why2}", diag
@@ -237,64 +311,54 @@ def report(apply=False, pair=None):
         print("Keep going -- it needs the dark end of the day as well as the lit one.")
         return 1
 
-    try:
-        band = float(c.get("GROUND_BAND", "6") or 6)
-    except ValueError:
-        band = 6.0
-    kind, payload, why, diag = propose(vals, band)
+    # No GROUND_BAND is read here on purpose. It is an OUTPUT of this run, not an
+    # input to it: see separated() and derive_band().
+    kind, payload, why, diag = propose(vals)
 
     if kind is None:
         print(f"No usable split: {why}.\n")
-        if diag and diag["binding"] == "band":
-            # The band is a SETTING. Reporting this as a camera failure sends
-            # someone off to check their webcam over a number in a config file.
-            print(f"What blocked it was the BAND, not the camera:")
+        if diag:
+            print("What blocked it is the spread INSIDE the clusters, which is a fact")
+            print("about the room and the camera rather than about any setting:")
             print(f"    closest split   {diag['k']} groups, tightest gap {diag['gap']:.1f}")
-            print(f"    required        {diag['need']:.1f}, which is 2 x GROUND_BAND={band:g}")
-            print(f"    cluster noise   {diag['sd']:.1f}, which would ask only "
-                  f"{3.0 * diag['sd']:.1f}")
+            print(f"    required        {diag['need']:.1f}, which is 3 x the "
+                  f"{diag['sd']:.1f} of measured noise")
             print()
-            print("The readings do separate; the hysteresis band is just set wider than")
-            print("this room's whole spread. GROUND_BAND is a runtime setting that also")
-            print("gates this calibration, and its shipped value is a guess about rooms in")
-            print("general, not a measurement of yours. It is also the THIRD of three")
-            print("anti-flap brakes -- the smoothed median and AGREE/DWELL sit downstream")
-            print("of it -- so it does not have to carry the load alone.")
+            print("GROUND_BAND is not involved. It is derived from this same measurement")
+            print("when a split succeeds, so no value in the config file can cause this")
+            print("refusal or cure it. What can:")
             print()
-            if diag["gap"] >= 3.0 * diag["sd"]:
-                print(f"  - GROUND_BAND at {diag['gap'] / 2.0:.1f} or below lets this split "
-                      f"through. Set it in")
-                print(f"      {CONF}")
-                print( "    and run this report again.")
-            else:
-                print("  - lowering GROUND_BAND will not be enough by itself: even at 0 the")
-                print(f"    noise floor asks {3.0 * diag['sd']:.1f} against a gap of "
-                      f"{diag['gap']:.1f}.")
-            print("  - sample a fuller day if this run missed the brightest or darkest")
-            print("    hours -- a truncated curve understates the gap it is judged on.")
-            print("\nNothing is written until --apply.")
-        else:
-            print("The spread WITHIN the clusters is as wide as the gaps between them, so")
-            print("this is the sensor and not a setting: either the room genuinely holds")
-            print("one light level, or the camera is not seeing the change.")
+            print("  - sample a fuller day, if this run missed the brightest or darkest")
+            print("    hours. A truncated curve understates the very gap it is judged on.")
+            print("  - move the machine or the lens, if the camera faces a wall.")
+            print()
+            print("Failing those, the room genuinely holds one light level or the camera")
+            print("cannot see the change, and the sensor cannot drive the ground here.")
         print("\nIf you would rather not chase it, GROUND=solar needs no sensor at all")
         print("and reaches two of the three grounds (see GROUND_SOLAR_DAY/NIGHT).")
         return 1
 
     if kind == 3:
-        night, day, cs = payload
+        cs, band = payload["cs"], payload["band"]
+        night, day = payload["night"], payload["day"]
         print(f"Three light levels found, centred at "
               f"{cs[0]:.1f} / {cs[1]:.1f} / {cs[2]:.1f}:")
         print(f"    GROUND_NIGHT={night}   at or below this -> the night ground")
         print(f"    GROUND_DAY={day}   at or above this -> the day (paper) ground")
         print(f"    between the two   -> slate")
+        print(f"    GROUND_BAND={band:g}   how far past a threshold a reading must go;")
+        print(f"                    1.5 x the {payload['sd']:.1f} of noise this run "
+              f"measured, so the")
+        print(f"                    band never asks more separation than the noise does")
+        for n in payload["notes"]:
+            print(f"    note: {n}")
         if not apply:
             print("\nWrite them with: overprint-calibrate-ground --apply")
             return 0
-        return write(c, str(night), str(day))
+        return write(c, str(night), str(day), band=band)
 
     # --- two levels -------------------------------------------------------
-    boundary, cs = payload
+    boundary, cs, band = payload["boundary"], payload["cs"], payload["band"]
     print(f"Only TWO light levels here, centred at {cs[0]:.1f} and {cs[1]:.1f},")
     print(f"split at {boundary}. Three would not separate: {why}.")
     print()
@@ -323,16 +387,33 @@ def report(apply=False, pair=None):
     # `off` means "this ground is not sensor-reachable". The adapter honours it,
     # so a two-ground split needs no special case downstream -- and it reads as
     # what it is in the config, rather than as a sentinel number.
+    rlo, rhi = payload["range"]
+    ok, at = reachable("night" if lo == "night" else "day", boundary, band, rlo, rhi)
+    if not ok:
+        print(f"\nThat pair will not fire: {lo if lo != 'slate' else hi} needs a reading "
+              f"of {at:.1f} past the", file=sys.stderr)
+        print(f"boundary and this run only saw {rlo:.1f}-{rhi:.1f}. Try the other pair.",
+              file=sys.stderr)
+        return 1
     return write(c, str(boundary) if lo == "night" else "off",
                     str(boundary) if hi == "day" else "off",
                     note=f"{lo} below {boundary}, {hi} above; "
-                         f"{'day' if lo == 'night' else 'night'} is not sensor-reachable")
+                         f"{'day' if lo == 'night' else 'night'} is not sensor-reachable",
+                    band=band)
 
 
-def write(c, night, day, note=None):
+def write(c, night, day, note=None, band=None):
     set_key("GROUND_NIGHT", night)
     set_key("GROUND_DAY", day)
+    was = (c.get("GROUND_BAND") or "").strip()
+    if band is not None:
+        set_key("GROUND_BAND", f"{band:g}")
     print(f"\nWritten to {CONF}.")
+    if band is not None:
+        # Say it plainly: this overwrites a setting the user may have chosen, and
+        # a threshold written without its band is only half an answer.
+        print(f"  GROUND_BAND={band:g}, derived from the noise measured on this run"
+              + (f" (was {was})" if was and was != f"{band:g}" else ""))
     if note:
         print(f"  {note}")
     # Read it back rather than asserting. Telling someone adaptation is off when

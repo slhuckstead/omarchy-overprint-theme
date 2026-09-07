@@ -50,7 +50,11 @@ GROUND=off
 #   overprint-calibrate-ground --start   then use the machine for a day
 GROUND_DAY=
 GROUND_NIGHT=
-GROUND_BAND=6    # hysteresis: how far past a threshold before it counts
+GROUND_BAND=6    # hysteresis: how far past a threshold before it counts.
+                 # overprint-calibrate-ground --apply OVERWRITES this from the
+                 # noise it measured (1.5 pooled SDs), because the right value is
+                 # a property of your camera, not of rooms in general. The 6 here
+                 # is inert until the two thresholds above are set.
 
 # Which ground the sun's two states map to. night+day here means slate is only
 # ever reached by the sensor; set GROUND_SOLAR_NIGHT=slate if you would rather

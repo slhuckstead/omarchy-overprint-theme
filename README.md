@@ -50,6 +50,21 @@ survives.
 Use that when tuning colour; it avoids rewriting every image underneath a theme
 you currently have applied.
 
+## Every sheet is its own pull
+
+Plate registration drifts per impression. It used to be a module constant, so
+the whole set was one press setup rendered many times; there are now as many
+registrations as there are wallpapers, and the colophon
+(`optional/bin/overprint-colophon`) states the offsets for the sheet you are
+looking at.
+
+The nominal offset — 3px on an 8px halftone cell — is unchanged and does the
+stylistic work on any single sheet. What drifts is how far one impression
+departs from the next: `MISREG_SPREAD` 1.5px, clamped at 3.0. That is an
+aesthetic setting rather than an error budget. Tuned as a press tolerance it
+disappears — two pulls come out identical to the eye, which is right for a
+quality press run and wrong for a Risograph, where misregistration is the point.
+
 ## Wallpaper aspect
 
 The wallpapers here are **16:9 at 3840x2160**. Omarchy hangs them with

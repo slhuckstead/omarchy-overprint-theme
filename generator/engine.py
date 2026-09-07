@@ -17,7 +17,52 @@ FIB = [1, 2, 3, 5, 8, 13, 21]
 
 # Three inks now. Two opposed, one that lets the mix wander somewhere real.
 ANGLES = [15.0, 75.0, 45.0]                 # classic separation angles
-MISREG = [(0, 0), (3, -2), (-2, 2)]         # px -- the hand-made tell
+MISREG = [(0, 0), (3, -2), (-2, 2)]         # px -- the NOMINAL registration
+# THE DRIFT IS THE STYLE, not an error budget -- and getting that backwards is
+# how this number was wrong twice.
+#
+# Asked as a printer what he would reject, Seth (who worked for one) said
+# anything past +0.75 px, and at a sigma tight enough to sit inside that the
+# whole thing became invisible: two pulls of the same sheet were identical to
+# the eye. Which is correct for a quality press run and wrong for a Risograph,
+# where misregistration IS the visual language and people buy the prints
+# BECAUSE the plates do not line up. He named it: "drift is part of it, so maybe
+# it goes further out."
+#
+# So the two numbers are separable and only one of them is about accuracy:
+#   MISREG      the NOMINAL offset -- already a deliberate 3px on an 8px cell,
+#               unchanged, and it does the stylistic work on any single sheet.
+#   SPREAD/MAX  how much one IMPRESSION differs from the next. Set for organic
+#               variation, not for tolerance: at sigma 1.5 two pulls are
+#               visibly different sheets; the clamp at 3.0 is where drift stops
+#               decorating the composition and starts eating it, these being
+#               recursive golden-ratio fields whose proportions are the design.
+MISREG_SPREAD = 1.5                         # px sigma of drift, per pull
+MISREG_MAX = 3.0                            # px, clamp -- style, not tolerance
+
+
+def registration(seed, spread=MISREG_SPREAD):
+    """Where the three plates actually land on THIS pull.
+
+    MISREG is the registration you set on the press. No press holds it: every
+    pull drifts a little, and that drift is the difference between a print and
+    a picture of a print. It used to be a constant, which meant all 132
+    wallpapers were the same press setup rendered 132 times rather than 132
+    pulls -- the one thing a real press cannot do is register identically twice,
+    and the comment on the line called it "the hand-made tell".
+
+    Plate 0 stays at the origin: a press registers TO the first plate, so the
+    others drift relative to it. Drawn from its own stream so that changing the
+    registration does not disturb the canopy or the grain -- one variable at a
+    time.
+    """
+    r = np.random.default_rng((int(seed) ^ 0x9E3779B9) & 0xFFFFFFFF)
+    out = [(0.0, 0.0)]
+    for dx, dy in MISREG[1:]:
+        jx = float(np.clip(r.normal(0, spread), -MISREG_MAX, MISREG_MAX))
+        jy = float(np.clip(r.normal(0, spread), -MISREG_MAX, MISREG_MAX))
+        out.append((dx + jx, dy + jy))
+    return out
 
 
 def hex2rgb(h):
@@ -109,7 +154,7 @@ REFERENCE_WIDTH = 2560
 
 
 def render(w, h, plates, palette, night=False, cell=9.0, grain=0.018,
-           amp=0.22, seed=0, scale=None):
+           amp=0.22, seed=0, scale=None, misreg=None, pull=None):
     """plates: list of coverage arrays, one per ink (values 0..1).
 
     scale defaults to w / REFERENCE_WIDTH, which keeps a render at any size
@@ -120,6 +165,14 @@ def render(w, h, plates, palette, night=False, cell=9.0, grain=0.018,
     cell = cell * scale
     canopy_scales = tuple(max(2.0, v * scale) for v in (20, 30, 44))
     rng = np.random.default_rng(seed)
+    # `pull` identifies THIS impression; `seed` stays the composition's texture
+    # seed. They are separate on purpose: the render seed is shared by every
+    # press and ground of a given composition (seed = 1000 + i*17, i being the
+    # composition index alone), so deriving registration from it would give 132
+    # wallpapers only 11 distinct registrations. Keeping them apart also means
+    # changing the registration does not disturb canopy or grain.
+    reg = misreg if misreg is not None else registration(
+        seed if pull is None else pull)
     plates = canopy(plates, rng, amp=amp, scales=canopy_scales)
     ground = hex2rgb(palette["night"] if night else palette["paper"])
     out = np.ones((h, w, 3), np.float32) * ground
@@ -127,7 +180,7 @@ def render(w, h, plates, palette, night=False, cell=9.0, grain=0.018,
     for i, cov in enumerate(plates):
         ink = hex2rgb(palette["inks"][i])
         dots = halftone(cov, ANGLES[i % 3], cell)
-        dx, dy = MISREG[i % 3]
+        dx, dy = reg[i % 3]
         dx, dy = int(round(dx * scale)), int(round(dy * scale))
         dots = np.roll(np.roll(dots, dy, 0), dx, 1)[..., None]
         if night:

@@ -11,7 +11,7 @@ rm -f "$UNITS"/overprint-backlight.{timer,service} "$UNITS"/overprint-failure-no
 systemctl --user daemon-reload 2>/dev/null
 
 rm -f "$BIN"/overprint-{screensaver,screensaver-run,screensaver-plate,make-launcher-shadow} \
-      "$BIN"/overprint-make-preview \
+      "$BIN"/overprint-make-preview "$BIN"/overprint-colophon \
       "$BIN"/overprint-{light,adapt,appearance,notify-failure} \
       "$BIN"/overprint-{ground,calibrate-ground} \
       "$BIN"/omarchy-launch-screensaver \

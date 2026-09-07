@@ -10,7 +10,7 @@ wallpaper file was one of six compositions re-inked. The differences that were
 real -- ground weight, and which pair of inks dominates a composition -- are
 differences between IMAGES, so that is where they now live.
 """
-import datetime, json, os, sys, shutil, subprocess
+import datetime, json, os, sys, shutil, subprocess, zlib
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import engine, compose, palette as P, themes
 
@@ -438,7 +438,8 @@ def main(level=None, slug=None, ship=None, levels=None):
             for i, (name, _, _, _) in enumerate(compose.VARIANTS):
                 img = engine.render(W, H, compose.make(name, W, H), pal,
                                     night=themes.is_dark(wl), cell=8.0,
-                                    seed=1000 + i * 17)
+                                    seed=1000 + i * 17,
+                                    pull=zlib.crc32(f"{wp}-{wl}-{name}".encode()))
                 stem = f"{wp}-{wl}-{name}"
                 out = bg if stem in ship else user_bg
                 engine.write_png(os.path.join(out, stem + ".png"), img)
@@ -710,7 +711,8 @@ def dist(outdir, force=False, width=None, previews=False, level=None):
         pal = dict(inks=themes.INKS[wp], paper=wall, night=wall)
         i = order.index(name)
         img = engine.render(W, H, compose.make(name, W, H), pal,
-                            night=themes.is_dark(wl), cell=8.0, seed=1000 + i * 17)
+                            night=themes.is_dark(wl), cell=8.0, seed=1000 + i * 17,
+                            pull=zlib.crc32(stem.encode()))
         engine.write_png(os.path.join(stage, stem + ".png"), img)
 
     print("  quantising...")
@@ -983,7 +985,8 @@ def for_display(level=None):
             wall = themes.level_wallpaper(wp, wl)
             pal = dict(inks=themes.INKS[wp], paper=wall, night=wall)
             img = engine.render(W, H, compose.make(comp, W, H), pal,
-                                night=themes.is_dark(wl), cell=8.0, seed=1000 + i * 17)
+                                night=themes.is_dark(wl), cell=8.0, seed=1000 + i * 17,
+                                pull=zlib.crc32(stem.encode()))
             engine.write_png(os.path.join(target, stem), img)
             total += 1
         subprocess.run("magick mogrify -colors 256 -define png:exclude-chunk=time "

@@ -73,9 +73,9 @@ if [[ $WANT_SCREENSAVER == yes ]]; then
                 "$HERE"/bin/overprint-screensaver-run \
                 "$HERE"/bin/overprint-screensaver-plate \
                 "$HERE"/bin/overprint-make-launcher-shadow "$BIN"/
-  # Not screensaver-specific, but it belongs on PATH and this is the only
+  # Not screensaver-specific, but they belong on PATH and this is the only
   # install path the theme has.
-  install -m755 "$HERE"/bin/overprint-make-preview "$BIN"/
+  install -m755 "$HERE"/bin/overprint-make-preview "$HERE"/bin/overprint-colophon "$BIN"/
 
   if ! grep -qF "$MARK_BEGIN" "$HOME/.bashrc" 2>/dev/null; then
     cat >> "$HOME/.bashrc" <<EOF

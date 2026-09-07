@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+"""The colophon for the print currently on your desktop.
+
+Every real print carries one: what press, what inks, what paper, what date.
+This one can state something a fixed generator could not -- the REGISTRATION of
+this particular pull. The plate offsets used to be a module constant, identical
+on all 132 wallpapers; they now drift per impression, so "how this one landed"
+is a fact about this image and not about the program.
+
+    overprint-colophon              the wallpaper currently displayed
+    overprint-colophon <name>       any wallpaper, by stem or path
+"""
+import os, sys, glob, zlib, tomllib, datetime, subprocess
+
+GEN = os.path.expanduser("~/.local/share/overprint")
+STATE = os.path.expanduser("~/.local/state/omarchy/current")
+THEMES = os.path.expanduser("~/.config/omarchy/themes")
+USER_BG = os.path.expanduser("~/.config/omarchy/backgrounds")
+
+
+def current_background():
+    try:
+        return os.path.realpath(os.readlink(f"{STATE}/background"))
+    except OSError:
+        return None
+
+
+def find(name):
+    if os.path.isfile(name):
+        return os.path.realpath(name)
+    stem = name[:-4] if name.endswith(".png") else name
+    hits = glob.glob(f"{THEMES}/*/backgrounds/{stem}.png") + \
+           glob.glob(f"{USER_BG}/*/{stem}.png")
+    return os.path.realpath(hits[0]) if hits else None
+
+
+def theme_toml():
+    for p in (f"{STATE}/theme/overprint.toml",):
+        try:
+            with open(p, "rb") as f:
+                return tomllib.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def px(path):
+    try:
+        r = subprocess.run(["magick", "identify", "-format", "%wx%h", path],
+                           capture_output=True, text=True, timeout=10)
+        return r.stdout.strip() or "?"
+    except Exception:
+        return "?"
+
+
+def main(argv):
+    if argv and argv[0] in ("-h", "--help"):
+        print(__doc__.strip()); return 0
+    path = find(argv[0]) if argv else current_background()
+    if not path or not os.path.isfile(path):
+        print("no wallpaper found", file=sys.stderr); return 1
+
+    stem = os.path.basename(path)[:-4]
+    parts = stem.split("-", 2)
+    press, ground, comp = (parts + ["?", "?", "?"])[:3]
+
+    t = theme_toml()
+    sys.path.insert(0, GEN)
+    try:
+        import engine, themes
+        inks = themes.INKS.get(press, t.get("inks", []))
+        reg = engine.registration(zlib.crc32(stem.encode()))
+        angles, cell_ref = engine.ANGLES, 8.0
+    except Exception:
+        inks, reg, angles, cell_ref = t.get("inks", []), None, None, None
+
+    pulled = datetime.datetime.fromtimestamp(os.path.getmtime(path))
+    size = px(path)
+    w = int(size.split("x")[0]) if "x" in size else None
+
+    print()
+    print(f"  {stem}")
+    print(f"  {'-' * len(stem)}")
+    print(f"  press      {press}")
+    if inks:
+        print(f"  inks       {'   '.join(inks)}")
+    print(f"  ground     {ground}" + (f"   {t['ground']}" if t.get("ground") else ""))
+    print(f"  sheet      {size} px")
+    if angles:
+        print(f"  screens    {'  '.join(f'{a:g}°' for a in angles)}")
+        if w:
+            print(f"  ruling     {cell_ref * w / 2560:.2f} px cell "
+                  f"(scaled from {cell_ref:g} at 2560)")
+    # The registration is DERIVED from the stem by the current engine, not read
+    # out of the file -- a PNG does not record how its plates landed. So it is
+    # only true of images this engine actually pulled. Say so rather than assert
+    # it: an image older than the engine was made when registration was a
+    # constant, and printing today's numbers for it would be a confident lie.
+    try:
+        eng_mtime = os.path.getmtime(os.path.join(GEN, "engine.py"))
+    except OSError:
+        eng_mtime = None
+    stale = eng_mtime is not None and os.path.getmtime(path) < eng_mtime
+    if reg and not stale:
+        print(f"  registered plate 1 at origin")
+        for i, (dx, dy) in enumerate(reg[1:], start=2):
+            print(f"             plate {i} {dx:+.2f}, {dy:+.2f} px")
+    elif reg:
+        print(f"  registered unknown -- this impression predates the current")
+        print(f"             engine, so its plate offsets are not recoverable")
+    print(f"  pulled     {pulled:%Y-%m-%d %H:%M}")
+    print(f"  edition    1/1 -- every pull registers differently")
+    print()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

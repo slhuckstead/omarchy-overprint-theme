@@ -123,6 +123,11 @@ def main(argv):
     print(f"  pulled     {pulled:%Y-%m-%d %H:%M}")
     print(f"  edition    1/1 -- every pull registers differently")
     print()
+    # The imprint. A colophon names who pulled the sheet; the printed block
+    # (the design canvas) carries the device beside this line, and the two
+    # should not disagree about what a colophon says.
+    print(f"  printed by S. L. Huckstead")
+    print()
     return 0
 
 

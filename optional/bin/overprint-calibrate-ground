@@ -143,29 +143,53 @@ def separated(cs, groups, band):
       - the noise inside the clusters (3 pooled SDs), and
       - what the hysteresis band can absorb (2 x GROUND_BAND), or a boundary is
         unreachable and one ground swallows its neighbour.
+
+    Also reports WHICH of the two set the requirement. That distinction is the
+    whole difference between "your camera cannot see this room" and "GROUND_BAND
+    is wider than this room", and only one of those is worth acting on.
     """
     sd = pooled_sd(groups)
-    need = max(2.0 * band, 3.0 * sd)
+    by_band, by_noise = 2.0 * band, 3.0 * sd
+    need = max(by_band, by_noise)
+    binding = "band" if by_band >= by_noise else "noise"
     gaps = [b - a for a, b in zip(cs, cs[1:])]
-    return min(gaps) >= need, sd, need, gaps
+    return min(gaps) >= need, sd, need, gaps, binding
 
 
 def propose(vals, band):
-    """-> (kind, payload, why). kind is 3, 2 or None.
+    """-> (kind, payload, why, diag). kind is 3, 2 or None.
 
     Three grounds if the readings support three. Otherwise TWO, because plenty
     of rooms genuinely have two light levels and nothing says all three grounds
     must be sensor-reachable -- refusing outright would throw away a day of
     sampling over a room that is simply not complicated. Only if two will not
     separate either is there nothing to say.
+
+    On a refusal, `diag` describes the split that came CLOSEST -- its tightest
+    gap, the requirement it missed, and which term set that requirement. A
+    refusal that cannot say what to change is indistinguishable from a broken
+    camera, and this one used to read like one.
     """
+    diag = None
+
+    def closest(k, gaps, sd, need, binding):
+        """Keep whichever k came nearest, scored as a fraction of what it needed
+        -- gaps from different k are not comparable in absolute terms."""
+        nonlocal diag
+        short = min(gaps)
+        ratio = short / need if need > 0 else 0.0
+        if diag is None or ratio > diag["ratio"]:
+            diag = {"k": k, "gap": short, "sd": sd, "need": need,
+                    "binding": binding, "ratio": ratio}
+
     got3 = kmeans(vals, 3)
     if got3:
         cs, groups = got3
-        ok, sd, need, gaps = separated(cs, groups, band)
+        ok, sd, need, gaps, binding = separated(cs, groups, band)
         if ok:
             return 3, (round((cs[0] + cs[1]) / 2, 1),
-                       round((cs[1] + cs[2]) / 2, 1), cs), ""
+                       round((cs[1] + cs[2]) / 2, 1), cs), "", None
+        closest(3, gaps, sd, need, binding)
         why3 = (f"three groups centred at {cs[0]:.1f} / {cs[1]:.1f} / {cs[2]:.1f}, "
                 f"gaps of {gaps[0]:.1f} and {gaps[1]:.1f}, against noise {sd:.1f} "
                 f"and a band of {band:.0f} -- needs {need:.1f}")
@@ -175,14 +199,15 @@ def propose(vals, band):
     got2 = kmeans(vals, 2)
     if got2:
         cs, groups = got2
-        ok, sd, need, gaps = separated(cs, groups, band)
+        ok, sd, need, gaps, binding = separated(cs, groups, band)
         if ok:
-            return 2, (round((cs[0] + cs[1]) / 2, 1), cs), why3
+            return 2, (round((cs[0] + cs[1]) / 2, 1), cs), why3, None
+        closest(2, gaps, sd, need, binding)
         why2 = (f"two groups centred at {cs[0]:.1f} / {cs[1]:.1f}, gap {gaps[0]:.1f}, "
                 f"against noise {sd:.1f} and a band of {band:.0f} -- needs {need:.1f}")
     else:
         why2 = "nor two"
-    return None, None, f"{why3}; and {why2}"
+    return None, None, f"{why3}; and {why2}", diag
 
 
 PAIRS = {"night-slate": ("night", "slate"), "slate-day": ("slate", "day")}
@@ -216,13 +241,44 @@ def report(apply=False, pair=None):
         band = float(c.get("GROUND_BAND", "6") or 6)
     except ValueError:
         band = 6.0
-    kind, payload, why = propose(vals, band)
+    kind, payload, why, diag = propose(vals, band)
 
     if kind is None:
-        print(f"No usable split: {why}.")
-        print("\nEither the room genuinely holds one light level, or the camera is\n"
-              "not seeing the change. The sensor cannot drive the ground here.\n"
-              "Leave GROUND=off, or use GROUND=solar, which needs no sensor at all.")
+        print(f"No usable split: {why}.\n")
+        if diag and diag["binding"] == "band":
+            # The band is a SETTING. Reporting this as a camera failure sends
+            # someone off to check their webcam over a number in a config file.
+            print(f"What blocked it was the BAND, not the camera:")
+            print(f"    closest split   {diag['k']} groups, tightest gap {diag['gap']:.1f}")
+            print(f"    required        {diag['need']:.1f}, which is 2 x GROUND_BAND={band:g}")
+            print(f"    cluster noise   {diag['sd']:.1f}, which would ask only "
+                  f"{3.0 * diag['sd']:.1f}")
+            print()
+            print("The readings do separate; the hysteresis band is just set wider than")
+            print("this room's whole spread. GROUND_BAND is a runtime setting that also")
+            print("gates this calibration, and its shipped value is a guess about rooms in")
+            print("general, not a measurement of yours. It is also the THIRD of three")
+            print("anti-flap brakes -- the smoothed median and AGREE/DWELL sit downstream")
+            print("of it -- so it does not have to carry the load alone.")
+            print()
+            if diag["gap"] >= 3.0 * diag["sd"]:
+                print(f"  - GROUND_BAND at {diag['gap'] / 2.0:.1f} or below lets this split "
+                      f"through. Set it in")
+                print(f"      {CONF}")
+                print( "    and run this report again.")
+            else:
+                print("  - lowering GROUND_BAND will not be enough by itself: even at 0 the")
+                print(f"    noise floor asks {3.0 * diag['sd']:.1f} against a gap of "
+                      f"{diag['gap']:.1f}.")
+            print("  - sample a fuller day if this run missed the brightest or darkest")
+            print("    hours -- a truncated curve understates the gap it is judged on.")
+            print("\nNothing is written until --apply.")
+        else:
+            print("The spread WITHIN the clusters is as wide as the gaps between them, so")
+            print("this is the sensor and not a setting: either the room genuinely holds")
+            print("one light level, or the camera is not seeing the change.")
+        print("\nIf you would rather not chase it, GROUND=solar needs no sensor at all")
+        print("and reaches two of the three grounds (see GROUND_SOLAR_DAY/NIGHT).")
         return 1
 
     if kind == 3:
